@@ -1,0 +1,22 @@
+# 서버
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+httpx==0.27.2
+beautifulsoup4==4.12.3
+Pillow==10.4.0
+pytesseract==0.3.13
+pydantic==2.9.2
+python-dotenv==1.0.1
+
+# 한국어 문장 분리
+kss==4.5.4
+
+# KoBERT / 모델 학습
+# ⚠️ torch는 아래 명령어로 따로 설치하세요 (CUDA 버전에 맞게)
+# CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# CUDA 11.8: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# CPU 전용:  pip install torch torchvision
+transformers>=4.40.0
+scikit-learn>=1.4.0
+pandas>=2.0.0

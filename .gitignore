@@ -1,0 +1,28 @@
+# 환경변수 (API 키 등 민감 정보 — 절대 커밋 금지)
+.env
+
+# 가상환경
+.venv/
+venv/
+
+# 학습된 모델 (용량 큼)
+models/kobert_ad_classifier/
+
+# 데이터 파일
+data/merged/
+data/raw/
+data/clean/
+data/training/
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+*.iml
+
+# 기타
+*.log
+.DS_Store
