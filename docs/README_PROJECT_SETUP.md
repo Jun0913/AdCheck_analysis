@@ -195,28 +195,3 @@ uvicorn analysis.main:app --host 0.0.0.0 --port 8000
 
 ---
 
-## 폴더 구조
-
-```
-analysis/
-├── analysis/               # FastAPI 앱
-│   ├── main.py             # 서버 진입점
-│   ├── models/schemas.py   # 요청/응답 스키마
-│   ├── routers/analyze.py  # 분석 라우터
-│   └── services/
-│       ├── ai_analyzer.py  # KoBERT 분석
-│       ├── extractor.py    # URL 크롤링 / OCR
-│       └── rule_engine.py  # 규칙기반 엔진
-├── data/
-│   ├── clean/              # 정제 시트 CSV
-│   ├── merged/             # 병합된 학습 데이터
-│   └── augment_data.py     # 데이터 증강 스크립트
-├── models/                 # 학습된 모델 (Git 제외, 드라이브로 공유)
-├── training/
-│   └── train.py            # KoBERT 학습 스크립트
-├── merge_clean_sheets.py   # 데이터 병합 스크립트
-├── test_server.py          # 서버 테스트 스크립트
-├── requirements.txt        # 패키지 목록 (torch 제외)
-├── README_PROJECT_SETUP.md # 이 파일
-└── README_GPU_SETUP.md     # GPU 학습 세팅 가이드
-```

@@ -7,9 +7,11 @@ import re
 import os
 from urllib.parse import urlparse
 
-# Windows Tesseract 경로 직접 지정
+# Tesseract 경로 설정
+# Windows 로컬 개발 환경
 if os.name == 'nt':
     pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# Linux 배포 환경: 별도 설정 불필요 (apt로 설치하면 /usr/bin/tesseract에 자동 위치)
 
 try:
     import kss
@@ -17,17 +19,30 @@ try:
 except ImportError:
     _KSS_AVAILABLE = False
 
-# ── 크롤링 차단 사이트 목록 ──────────────────────────────────
-# 로그인 필요 또는 강력한 봇 차단으로 크롤링 불가한 사이트
-BLOCKED_DOMAINS = {
-    "coupang.com":              "쿠팡은 크롤링이 차단되어 있습니다. 광고 문구를 직접 복사해서 텍스트 분석을 이용해주세요.",
-    "youtube.com":              "유튜브는 크롤링이 차단되어 있습니다. 영상 설명란 텍스트를 복사해서 텍스트 분석을 이용해주세요.",
-    "youtu.be":                 "유튜브는 크롤링이 차단되어 있습니다. 영상 설명란 텍스트를 복사해서 텍스트 분석을 이용해주세요.",
-    "instagram.com":            "인스타그램은 로그인이 필요하여 크롤링이 불가합니다. 광고 문구를 복사해서 텍스트 분석을 이용해주세요.",
-    "smartstore.naver.com":     "네이버 스마트스토어는 크롤링이 차단되어 있습니다. 상품 설명을 복사해서 텍스트 분석을 이용해주세요.",
-    "oliveyoung.co.kr":         "올리브영은 크롤링이 차단되어 있습니다. 상품 설명을 복사해서 텍스트 분석을 이용해주세요.",
-    "kakao.com":                "카카오는 로그인이 필요하여 크롤링이 불가합니다. 광고 문구를 복사해서 텍스트 분석을 이용해주세요.",
-    "facebook.com":             "페이스북은 로그인이 필요하여 크롤링이 불가합니다. 광고 문구를 복사해서 텍스트 분석을 이용해주세요.",
+try:
+    from playwright.async_api import async_playwright
+    _PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    _PLAYWRIGHT_AVAILABLE = False
+
+# ── 로그인 필요 사이트 (Playwright로도 불가) ──────────────────
+# 로그인 없이는 어떤 방법으로도 크롤링 불가한 사이트
+LOGIN_REQUIRED_DOMAINS = {
+    "youtube.com":   "유튜브는 크롤링이 차단되어 있습니다. 영상 설명란 텍스트를 복사해서 텍스트 분석을 이용해주세요.",
+    "youtu.be":      "유튜브는 크롤링이 차단되어 있습니다. 영상 설명란 텍스트를 복사해서 텍스트 분석을 이용해주세요.",
+    "instagram.com": "인스타그램은 로그인이 필요하여 크롤링이 불가합니다. 광고 문구를 복사해서 텍스트 분석을 이용해주세요.",
+    "facebook.com":  "페이스북은 로그인이 필요하여 크롤링이 불가합니다. 광고 문구를 복사해서 텍스트 분석을 이용해주세요.",
+    "kakao.com":     "카카오는 로그인이 필요하여 크롤링이 불가합니다. 광고 문구를 복사해서 텍스트 분석을 이용해주세요.",
+}
+
+# ── Playwright로 재시도할 사이트 (JS 렌더링 필요) ──────────────
+# httpx로 1차 시도 후 텍스트가 부족하면 Playwright로 재시도
+PLAYWRIGHT_DOMAINS = {
+    "coupang.com",
+    "smartstore.naver.com",
+    "oliveyoung.co.kr",
+    "musinsa.com",
+    "kurly.com",
 }
 
 # ── 사이트별 본문 추출 CSS 선택자 ────────────────────────────
@@ -48,13 +63,19 @@ def _get_domain(url: str) -> str:
     return domain
 
 
-def _check_blocked(url: str) -> str | None:
-    """차단된 사이트면 안내 메시지 반환, 아니면 None"""
+def _check_login_required(url: str) -> str | None:
+    """로그인 필요 사이트면 안내 메시지 반환, 아니면 None"""
     domain = _get_domain(url)
-    for blocked, message in BLOCKED_DOMAINS.items():
+    for blocked, message in LOGIN_REQUIRED_DOMAINS.items():
         if blocked in domain:
             return message
     return None
+
+
+def _needs_playwright(url: str) -> bool:
+    """Playwright 재시도가 필요한 사이트인지 확인"""
+    domain = _get_domain(url)
+    return any(d in domain for d in PLAYWRIGHT_DOMAINS)
 
 
 def _extract_main_text(soup: BeautifulSoup, domain: str) -> str:
@@ -88,13 +109,36 @@ def _clean_text(text: str) -> str:
 
 
 async def extract_from_url(url: str) -> str:
-    """URL에서 광고 본문 텍스트 추출"""
+    """URL에서 광고 본문 텍스트 추출
+    1단계: httpx + BeautifulSoup (빠름)
+    2단계: 텍스트 부족 시 Playwright로 재시도 (JS 렌더링)
+    """
 
-    # 차단 사이트 체크
-    blocked_msg = _check_blocked(url)
-    if blocked_msg:
-        raise ValueError(blocked_msg)
+    # 로그인 필요 사이트 체크
+    login_msg = _check_login_required(url)
+    if login_msg:
+        raise ValueError(login_msg)
 
+    # 1단계: httpx로 빠르게 시도
+    text = await _extract_with_httpx(url)
+
+    # 2단계: 텍스트가 너무 적으면 Playwright로 재시도
+    if len(text) < 200 and _PLAYWRIGHT_AVAILABLE:
+        playwright_text = await _extract_with_playwright(url)
+        if len(playwright_text) > len(text):
+            text = playwright_text
+
+    if not text or len(text) < 20:
+        raise ValueError(
+            "페이지에서 분석할 텍스트를 찾지 못했습니다. "
+            "광고 문구를 직접 복사해서 텍스트 분석을 이용해주세요."
+        )
+
+    return text
+
+
+async def _extract_with_httpx(url: str) -> str:
+    """httpx + BeautifulSoup으로 텍스트 추출 (1단계)"""
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -122,31 +166,54 @@ async def extract_from_url(url: str) -> str:
             response.raise_for_status()
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 403:
-            raise ValueError(
-                "해당 사이트는 크롤링이 차단되어 있습니다. "
-                "광고 문구를 직접 복사해서 텍스트 분석을 이용해주세요."
-            )
+            return ""  # Playwright로 재시도하도록 빈 문자열 반환
         elif e.response.status_code == 404:
             raise ValueError("페이지를 찾을 수 없습니다. URL을 다시 확인해주세요.")
         else:
-            raise ValueError(f"페이지 접근 실패 ({e.response.status_code}). URL을 다시 확인해주세요.")
+            return ""
     except httpx.TimeoutException:
         raise ValueError("페이지 로딩 시간이 초과되었습니다. 잠시 후 다시 시도해주세요.")
-    except Exception as e:
-        raise ValueError(f"URL에서 텍스트를 가져오지 못했습니다: {str(e)}")
+    except Exception:
+        return ""
 
     domain = _get_domain(url)
     soup = BeautifulSoup(response.text, "html.parser")
     text = _extract_main_text(soup, domain)
-    text = _clean_text(text)
+    return _clean_text(text)
 
-    if not text or len(text) < 20:
-        raise ValueError(
-            "페이지에서 분석할 텍스트를 찾지 못했습니다. "
-            "광고 문구를 직접 복사해서 텍스트 분석을 이용해주세요."
-        )
 
-    return text
+async def _extract_with_playwright(url: str) -> str:
+    """Playwright로 JS 렌더링 후 텍스트 추출 (2단계)"""
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                )
+            )
+            page = await context.new_page()
+
+            # JS, CSS 외 불필요한 리소스 차단 (속도 향상)
+            await page.route("**/*.{png,jpg,jpeg,gif,svg,woff,woff2,ttf}", lambda r: r.abort())
+
+            await page.goto(url, timeout=20000, wait_until="domcontentloaded")
+
+            # 페이지 안정화 대기 (동적 콘텐츠 로딩)
+            await page.wait_for_timeout(2000)
+
+            html = await page.content()
+            await browser.close()
+
+        domain = _get_domain(url)
+        soup = BeautifulSoup(html, "html.parser")
+        text = _extract_main_text(soup, domain)
+        return _clean_text(text)
+
+    except Exception:
+        return ""
 
 
 def extract_from_image(image_bytes: bytes) -> str:

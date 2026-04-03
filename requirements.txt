@@ -9,6 +9,9 @@ pytesseract==0.3.13
 pydantic==2.9.2
 python-dotenv==1.0.1
 
+# JS 렌더링 크롤링 (쿠팡, 올리브영 등)
+playwright==1.58.0
+
 # 한국어 문장 분리
 kss==4.5.4
 
