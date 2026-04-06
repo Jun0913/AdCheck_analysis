@@ -42,10 +42,11 @@ from sklearn.metrics import classification_report
 # 설정
 # ────────────────────────────────────────────
 
-BASE_MODEL      = "snunlp/KR-ELECTRA-discriminator"
+BASE_MODEL      = "skt/kobert-base-v1"  # KoBERT base checkpoint
 MERGED_PATH     = "data/merged/merged_clean.csv"
 MODEL_SAVE_PATH = "models/kobert_ad_classifier"
-CKPT_DIR        = "models/checkpoints"
+# Use a separate checkpoint folder so we don't resume from old Electra runs
+CKPT_DIR        = "models/checkpoints_kobert"
 
 NUM_LABELS  = 3
 MAX_LEN     = 128   # GPU: 128 (CPU보다 길게 잡아도 빠름)
