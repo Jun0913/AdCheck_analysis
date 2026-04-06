@@ -33,3 +33,5 @@ kss==4.5.4
 transformers>=4.40.0
 scikit-learn>=1.4.0
 pandas>=2.0.0
+# KoBERT tokenizer/model (HF port)
+git+https://github.com/SKTBrain/KoBERT.git#subdirectory=kobert_hf
