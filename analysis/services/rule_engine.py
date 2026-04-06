@@ -2,6 +2,65 @@ import re
 from analysis.models.schemas import SuspicionLevel, SentenceResult
 
 # ────────────────────────────────────────────
+# 화이트리스트 (허용 표현)
+# 출처: 정제 시트 기준 라벨=1 (허용문구)
+# 이 표현이 포함된 문장은 규칙기반 의심 탐지에서 제외
+# ────────────────────────────────────────────
+
+WHITELIST_KEYWORDS: list[str] = [
+    # 식약처 허가 기능성 표현
+    "식약처 허가 기능성 화장품",
+    "기능성 화장품 심사",
+    "기능성 화장품 (미백에 도움)",
+    "기능성 화장품 (주름 개선에 도움)",
+    "기능성 화장품 (자외선 차단)",
+    # 피부과 테스트
+    "피부과 테스트 완료",
+    "피부과 임상 테스트 완료",
+    "피부과 테스트 마친",
+    # 허용 효능 표현 (도움을 주는 수준)
+    "피부 보습에 도움",
+    "피부 진정에 도움",
+    "피부 결 정돈에 도움",
+    "수분 공급에 도움",
+    "피부에 생기를 부여",
+    "피부를 건강하게 가꾸는 데 도움",
+    "촉촉한 사용감",
+    "산뜻한 마무리감",
+    "모발 손상 개선에 도움",
+    "빠지는 모발 감소에 도움",
+    "탈모 증상 완화에 도움",
+    # 자외선 차단 (허용)
+    "자외선 차단 기능",
+    "SPF50+/PA++++",
+    "SPF",
+    "PA+",
+    # 천연·유기농 지수 (ISO 기반 허용 표현)
+    "ISO 16128",
+    "천연(유래)지수",
+    "천연유래지수",
+    "ISO 천연",
+    "유기농 지수",
+    # 인증 관련 허용 표현
+    "COSMOS 인증",
+    "시험검사기관",
+    "ISO 인증",
+    # 기타 허용 표현
+    "가려준다",
+    "탄력/리프팅 개선",
+    "건조한 피부를 촉촉하게",
+    "건조함 등으로 인한 트러블",
+    "피부장벽 강화에 도움",
+    "피부 수분 유지에 도움",
+    # 일반 제품명/카테고리 표현 (KoBERT 과탐지 방지)
+    "보습로션", "아기로션", "아기크림", "아기보습",
+    "로션", "크림", "세럼", "앰플", "에센스", "토너",
+    "선크림", "선스크린", "클렌저", "폼클렌징",
+    "공유하기", "URL복사", "신고하기", "본문 바로가기",
+    "카테고리 이동", "이웃추가", "MY메뉴",
+]
+
+# ────────────────────────────────────────────
 # 금지 키워드 사전
 # 출처: 식품의약품안전처 화장품 표시·광고 가이드라인,
 #       공정거래위원회 표시광고법 위반 사례집
@@ -14,11 +73,12 @@ FORBIDDEN_KEYWORDS: dict[str, list[str]] = {
         # 치료·완치 관련
         "치료", "완치", "치유", "치료제", "치료 효과", "치료에 도움",
         "의약품", "약효", "약리", "처방",
+        "예방", "증상 개선", "증상 완화",
         # 질환명 직접 연결
-        "아토피 치료", "아토피 개선", "아토피 완화",
-        "피부염 치료", "피부염 개선", "피부염 완화",
-        "알레르기 치료", "알레르기 억제", "알레르기 완화",
-        "습진 치료", "건선 치료", "여드름 치료",
+        "아토피", "아토피 치료", "아토피 개선", "아토피 완화",
+        "피부염", "피부염 치료", "피부염 개선", "피부염 완화",
+        "알레르기", "알레르기 치료", "알레르기 억제", "알레르기 완화",
+        "습진", "건선", "여드름", "질염",
         "상처 치유", "상처 회복", "흉터 제거", "흉터 치료",
         # 항균·소독 계열
         "항균", "살균", "멸균", "소독", "항바이러스",
@@ -46,10 +106,11 @@ FORBIDDEN_KEYWORDS: dict[str, list[str]] = {
         # 기간 단정
         "7일 만에", "3일 만에", "하루 만에", "일주일 만에",
         "2주 만에", "한 달 만에",
+        "며칠 만에", "만에 끝",
         # 보장·확신 표현
         "효과 보장", "결과 보장", "보장합니다", "보장된",
         "반드시 효과", "반드시 개선", "확실히 효과",
-        "확실한 효과", "확실히 좋아진",
+        "확실한 효과", "확실히 좋아진", "보장",
         # 완벽·전체 표현
         "완벽한", "완전히", "완전 제거", "완전 개선",
         "전부 없애", "전부 제거",
@@ -111,6 +172,7 @@ FORBIDDEN_KEYWORDS: dict[str, list[str]] = {
         # 후기·체험 유도
         "후기 인증", "사용자 인증", "실사용 인증",
         "효과 인증", "전후 사진 인증",
+        "사용해보니", "써보니", "직접 사용", "사라졌네요", "체험담",
     ],
 
     # ── 비교 우위 단정 표현 ─────────────────────────────
@@ -118,6 +180,13 @@ FORBIDDEN_KEYWORDS: dict[str, list[str]] = {
         "타사 대비", "경쟁사보다", "시중 제품보다",
         "기존 제품보다 월등", "압도적으로 뛰어난",
         "가장 효과적인", "가장 빠른", "가장 강력한",
+    ],
+
+    # ── 첨단 기술·재생 과대 주장 (기능성 오인 세부) ─────────
+    "첨단기술오인": [
+        "DNA", "줄기세포", "엑소좀", "세포 재생", "세포 활성",
+        "피부세포", "재생 기술", "차세대 기술", "나노 입자",
+        "진피층 침투", "피부 깊숙한 층", "MTS", "미세침", "필러급",
     ],
 }
 
@@ -138,7 +207,7 @@ CAUTION_KEYWORDS: list[str] = [
     "즉시", "빠른 효과", "빠르게 개선", "놀라운 변화",
     "단기간", "빠른 시간 내",
     # 혁신·과학 과장
-    "혁신적", "획기적", "신개념", "차세대",
+    "혁신적", "획기적", "신개념", "차세대", "차세대 기술",
     "과학적으로 증명", "과학적 입증",
     # 천연·유기농 과장
     "100% 천연", "완전 천연", "순수 천연",
@@ -146,6 +215,7 @@ CAUTION_KEYWORDS: list[str] = [
     # 기타 과장 가능 표현
     "피부 나이 역전", "피부 나이를 되돌리",
     "동안 피부 보장", "동안 효과",
+    "엑소좀", "피부나이", "나노 입자",
 ]
 
 
@@ -160,6 +230,7 @@ _PATTERN_DESC: dict[str, str] = {
     "안전성단정":  "안전성을 근거 없이 단정하는 표현",
     "추천보증":   "전문가 추천·인증을 주장하는 표현",
     "비교우위":   "근거 없이 타사 대비 우위를 주장하는 표현",
+    "첨단기술오인": "첨단 기술·세포 재생을 근거 없이 강조하는 표현",
 }
 
 
@@ -169,6 +240,18 @@ _PATTERN_DESC: dict[str, str] = {
 
 def analyze_sentence(sentence: str) -> SentenceResult:
     """1차 규칙기반 엔진: 문장 하나를 분석하여 SentenceResult 반환"""
+
+    # ── 화이트리스트 체크 ───────────────────────────────────
+    # 허용 표현이 포함된 문장은 정상으로 처리
+    for wl_kw in WHITELIST_KEYWORDS:
+        if wl_kw in sentence:
+            return SentenceResult(
+                sentence=sentence,
+                suspicion_level=SuspicionLevel.NORMAL,
+                matched_keywords=[],
+                reason="허용된 표현이 포함되어 있습니다.",
+            )
+
     matched_keywords: list[str] = []
     matched_patterns: list[str] = []
 
@@ -190,7 +273,8 @@ def analyze_sentence(sentence: str) -> SentenceResult:
         reason = _build_reason(matched_patterns, matched_keywords)
     elif caution_matches:
         level = SuspicionLevel.CAUTION
-        reason = f"과장 가능성이 있는 표현이 포함되어 있습니다: {', '.join(caution_matches)}"
+        kw_display = ", ".join(f"'{kw}'" for kw in caution_matches[:3])
+        reason = f"{kw_display} 표현은 효과를 과장하거나 오인을 유발할 가능성이 있어 주의가 필요합니다."
     else:
         level = SuspicionLevel.NORMAL
         reason = "특별히 의심되는 표현이 발견되지 않았습니다."
@@ -203,10 +287,49 @@ def analyze_sentence(sentence: str) -> SentenceResult:
     )
 
 
+_PATTERN_REASON_TEMPLATE: dict[str, str] = {
+    "의약품오인":  "'{kw}' 표현은 화장품에서 사용이 금지된 의약품 오인 표현입니다. 화장품은 질병의 치료·예방을 표방할 수 없습니다.",
+    "효능과장":   "'{kw}' 표현은 효과를 단정하거나 과장하는 표현으로, 소비자를 오인하게 할 수 있습니다.",
+    "기능성오인":  "'{kw}' 표현은 식약처 기능성 심사 없이 기능성을 주장하는 표현으로, 허가받지 않은 효능 광고에 해당할 수 있습니다.",
+    "안전성단정":  "'{kw}' 표현은 과학적 근거 없이 안전성을 단정하는 표현입니다. 화장품은 부작용이 없다고 단정할 수 없습니다.",
+    "추천보증":   "'{kw}' 표현은 전문가 추천·인증을 주장하는 표현으로, 실제 근거 없이 사용 시 허위광고에 해당할 수 있습니다.",
+    "비교우위":   "'{kw}' 표현은 근거 없이 타사 대비 우위를 주장하는 표현으로, 비교광고 기준에 위반될 수 있습니다.",
+}
+
 def _build_reason(patterns: list[str], keywords: list[str]) -> str:
-    desc = [_PATTERN_DESC.get(p, p) for p in patterns]
-    kw_str = ", ".join(sorted(set(keywords)))
-    return f"{' / '.join(desc)}이 포함되어 있습니다. (감지 키워드: {kw_str})"
+    """패턴 태그 + 감지 키워드를 조합해 문구별 맞춤 이유 생성"""
+    if not patterns:
+        return "특별히 의심되는 표현이 발견되지 않았습니다."
+
+    reasons = []
+    used_keywords = set()
+
+    for pattern in patterns:
+        template = _PATTERN_REASON_TEMPLATE.get(pattern)
+        if not template:
+            continue
+
+        # 해당 패턴에 속하는 키워드 중 아직 사용 안 된 것 선택
+        pattern_keywords = FORBIDDEN_KEYWORDS.get(pattern, [])
+        matched = [kw for kw in keywords if kw in pattern_keywords and kw not in used_keywords]
+
+        if matched:
+            kw_display = ", ".join(f"'{kw}'" for kw in matched[:2])  # 최대 2개
+            reason = template.replace("'{kw}'", kw_display)
+            used_keywords.update(matched[:2])
+        else:
+            # 해당 패턴 키워드가 없으면 감지된 키워드 중 첫 번째 사용
+            remaining = [kw for kw in keywords if kw not in used_keywords]
+            if remaining:
+                kw_display = f"'{remaining[0]}'"
+                reason = template.replace("'{kw}'", kw_display)
+                used_keywords.add(remaining[0])
+            else:
+                reason = template.replace("'{kw}' 표현은", "해당 표현은")
+
+        reasons.append(reason)
+
+    return " / ".join(reasons)
 
 
 def calculate_overall_score(results: list[SentenceResult]) -> tuple[float, SuspicionLevel]:

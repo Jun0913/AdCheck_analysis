@@ -195,3 +195,13 @@ uvicorn analysis.main:app --host 0.0.0.0 --port 8000
 
 ---
 
+## 룰 엔진 빠른 점검
+
+정제 시트를 이용해 규칙 엔진이 어느 정도 맞게 동작하는지 간단히 확인하려면:
+
+```
+python -m analysis.tools.eval_rule_engine --limit 1000
+```
+
+`--limit 0`이면 전체 시트를 사용합니다. 모델 재학습 없이 규칙 수정 효과를 빠르게 보는 회귀 체크용 스크립트입니다.
+

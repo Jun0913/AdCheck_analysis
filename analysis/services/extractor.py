@@ -48,6 +48,7 @@ PLAYWRIGHT_DOMAINS = {
 # ── 사이트별 본문 추출 CSS 선택자 ────────────────────────────
 SITE_SELECTORS = {
     "blog.naver.com":   ["div.se-main-container", "div#postViewArea", "div.post-view"],
+    "m.blog.naver.com": ["div.se-main-container", "div#postViewArea", "div.post-view", "div.blog_content"],
     "tistory.com":      ["div.entry-content", "article", "div.article-view"],
     "brunch.co.kr":     ["div.wrap_body", "article"],
     "oliveyoung.co.kr": ["div.prd-detail", "div#artcInfo", "div.prd_detail_box"],
@@ -61,6 +62,20 @@ def _get_domain(url: str) -> str:
     parsed = urlparse(url)
     domain = parsed.netloc.replace("www.", "")
     return domain
+
+
+def _normalize_url(url: str) -> str:
+    """네이버 블로그 등 본문 접근이 어려운 URL을 크롤링 친화적으로 변환"""
+    # 네이버 블로그: 모바일 버전이 본문 추출 훨씬 용이
+    if "blog.naver.com" in url:
+        # /PostView.naver?blogId=xxx&logNo=yyy → m.blog.naver.com/xxx/yyy
+        import re as _re
+        m = _re.search(r'blogId=([^&]+)&logNo=(\d+)', url)
+        if m:
+            return f"https://m.blog.naver.com/{m.group(1)}/{m.group(2)}"
+        # 이미 /blogId/logNo 형태면 모바일로만 변환
+        url = url.replace("blog.naver.com", "m.blog.naver.com")
+    return url
 
 
 def _check_login_required(url: str) -> str | None:
@@ -80,10 +95,23 @@ def _needs_playwright(url: str) -> bool:
 
 def _extract_main_text(soup: BeautifulSoup, domain: str) -> str:
     """사이트별 선택자로 본문 추출, 없으면 전체 텍스트 추출"""
-    # 공통 제거 태그
+    # 공통 제거 태그 — 네비게이션, UI 요소 포함
     for tag in soup(["script", "style", "nav", "footer", "header",
-                     "aside", "iframe", "noscript", "svg"]):
+                     "aside", "iframe", "noscript", "svg",
+                     "button", "input", "select", "form"]):
         tag.decompose()
+
+    # 네이버 블로그 UI 요소 추가 제거
+    for selector in [
+        ".blog_menu", ".gnb", ".lnb", ".snb",
+        ".post_menu", ".post_toolbar", ".post_share",
+        "#header", "#footer", "#gnb", "#lnb",
+        ".comment_area", ".related_posts",
+        "[class*='menu']", "[class*='toolbar']",
+        "[class*='navigation']", "[id*='menu']",
+    ]:
+        for el in soup.select(selector):
+            el.decompose()
 
     # 사이트별 선택자 시도
     selectors = SITE_SELECTORS.get(domain, []) + SITE_SELECTORS["default"]
@@ -91,7 +119,7 @@ def _extract_main_text(soup: BeautifulSoup, domain: str) -> str:
         element = soup.select_one(selector)
         if element:
             text = element.get_text(separator="\n")
-            if len(text.strip()) > 100:  # 너무 짧으면 다음 선택자 시도
+            if len(text.strip()) > 100:
                 return text.strip()
 
     # 선택자 실패 → 전체 텍스트
@@ -103,15 +131,15 @@ def _clean_text(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)   # 연속 빈줄 제거
     text = re.sub(r" {2,}", " ", text)         # 연속 공백 제거
     text = re.sub(r"\t+", " ", text)           # 탭 제거
-    # 너무 짧은 줄 제거 (1~2글자짜리 잡음 제거)
-    lines = [line.strip() for line in text.split("\n") if len(line.strip()) > 2]
+    # 1글자짜리 잡음만 제거 (기존 2글자 → 1글자로 완화)
+    lines = [line.strip() for line in text.split("\n") if len(line.strip()) > 1]
     return "\n".join(lines)
 
 
 async def extract_from_url(url: str) -> str:
     """URL에서 광고 본문 텍스트 추출
-    1단계: httpx + BeautifulSoup (빠름)
-    2단계: 텍스트 부족 시 Playwright로 재시도 (JS 렌더링)
+    1단계: httpx + BeautifulSoup (빠름, 최대 8초)
+    2단계: Playwright 재시도 필요한 사이트만 (JS 렌더링, 최대 15초)
     """
 
     # 로그인 필요 사이트 체크
@@ -119,14 +147,18 @@ async def extract_from_url(url: str) -> str:
     if login_msg:
         raise ValueError(login_msg)
 
-    # 1단계: httpx로 빠르게 시도
-    text = await _extract_with_httpx(url)
+    # Playwright 필요 사이트는 바로 Playwright로
+    if _needs_playwright(url) and _PLAYWRIGHT_AVAILABLE:
+        text = await _extract_with_playwright(url)
+    else:
+        # 1단계: httpx로 빠르게 시도
+        text = await _extract_with_httpx(url)
 
-    # 2단계: 텍스트가 너무 적으면 Playwright로 재시도
-    if len(text) < 200 and _PLAYWRIGHT_AVAILABLE:
-        playwright_text = await _extract_with_playwright(url)
-        if len(playwright_text) > len(text):
-            text = playwright_text
+        # 2단계: 텍스트가 너무 적고 Playwright 가능하면 재시도
+        if len(text) < 200 and _PLAYWRIGHT_AVAILABLE:
+            playwright_text = await _extract_with_playwright(url)
+            if len(playwright_text) > len(text):
+                text = playwright_text
 
     if not text or len(text) < 20:
         raise ValueError(
@@ -139,6 +171,7 @@ async def extract_from_url(url: str) -> str:
 
 async def _extract_with_httpx(url: str) -> str:
     """httpx + BeautifulSoup으로 텍스트 추출 (1단계)"""
+    url = _normalize_url(url)  # 네이버 블로그 등 URL 변환
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -149,16 +182,11 @@ async def _extract_with_httpx(url: str) -> str:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Cache-Control": "max-age=0",
     }
 
     try:
         async with httpx.AsyncClient(
-            timeout=20.0,
+            timeout=8.0,  # 20초 → 8초로 단축
             headers=headers,
             follow_redirects=True,
         ) as client:
@@ -166,7 +194,7 @@ async def _extract_with_httpx(url: str) -> str:
             response.raise_for_status()
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 403:
-            return ""  # Playwright로 재시도하도록 빈 문자열 반환
+            return ""
         elif e.response.status_code == 404:
             raise ValueError("페이지를 찾을 수 없습니다. URL을 다시 확인해주세요.")
         else:
@@ -196,13 +224,19 @@ async def _extract_with_playwright(url: str) -> str:
             )
             page = await context.new_page()
 
-            # JS, CSS 외 불필요한 리소스 차단 (속도 향상)
-            await page.route("**/*.{png,jpg,jpeg,gif,svg,woff,woff2,ttf}", lambda r: r.abort())
+            # 이미지, 폰트, 미디어 차단 (속도 향상)
+            await page.route(
+                "**/*.{png,jpg,jpeg,gif,svg,woff,woff2,ttf,otf,mp4,mp3,webp}",
+                lambda r: r.abort()
+            )
 
-            await page.goto(url, timeout=20000, wait_until="domcontentloaded")
+            await page.goto(url, timeout=12000, wait_until="domcontentloaded")
 
-            # 페이지 안정화 대기 (동적 콘텐츠 로딩)
-            await page.wait_for_timeout(2000)
+            # 고정 대기 제거 → 네트워크 안정화 대기로 교체 (더 빠름)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass  # timeout 나도 현재 상태로 진행
 
             html = await page.content()
             await browser.close()
@@ -233,20 +267,17 @@ def split_sentences(text: str) -> list[str]:
 def _split_with_kss(text: str) -> list[str]:
     """kss 라이브러리를 사용한 한국어 문장 분리"""
     try:
-        # 줄바꿈 기준으로 먼저 단락 분리 후 각 단락을 kss로 분리
         paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
         sentences = []
         for para in paragraphs:
             split = kss.split_sentences(para, backend="punct")
             sentences.extend(split)
-        # 너무 짧은 조각 제거
-        return [s.strip() for s in sentences if len(s.strip()) > 5]
+        return [s.strip() for s in sentences if len(s.strip()) > 3]
     except Exception:
-        # kss 오류 시 정규식 폴백
         return _split_with_regex(text)
 
 
 def _split_with_regex(text: str) -> list[str]:
     """정규식 기반 문장 분리 (폴백용)"""
     sentences = re.split(r"(?<=[.!?])\s+|[\n]+", text)
-    return [s.strip() for s in sentences if len(s.strip()) > 5]
+    return [s.strip() for s in sentences if len(s.strip()) > 3]
