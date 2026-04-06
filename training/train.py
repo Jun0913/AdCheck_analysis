@@ -26,6 +26,8 @@ KoBERT 학습 스크립트 (GPU 최적화)
 import os
 import glob
 import time
+import random
+import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -52,7 +54,11 @@ NUM_LABELS  = 3
 MAX_LEN     = 128   # GPU: 128 (CPU보다 길게 잡아도 빠름)
 BATCH_SIZE  = 32    # GPU: 32 (VRAM 4GB↑ 기준, 부족하면 16으로)
 EPOCHS      = 5     # GPU: 5 (CPU보다 여유 있게)
-LR          = 2e-5  # 에폭 늘린 만큼 학습률 살짝 낮춤
+LR          = 2e-5
+WEIGHT_DECAY = 1e-2  # AdamW L2 regularization to reduce overfitting
+LABEL_SMOOTH = 0.1   # Softens hard labels to improve generalization
+EARLY_STOP_PATIENCE = 2  # Stop if val loss does not improve for N epochs
+SEED = 42  # Reproducibility seed  # 에폭 늘린 만큼 학습률 살짝 낮춤
 
 LABEL_MAP   = {"정상": 0, "주의": 1, "의심": 2}
 LABEL_NAMES = ["정상", "주의", "의심"]
@@ -61,6 +67,16 @@ LABEL_NAMES = ["정상", "주의", "의심"]
 # ────────────────────────────────────────────
 # 디바이스 설정
 # ────────────────────────────────────────────
+
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 
 def get_device():
     if torch.cuda.is_available():
@@ -184,6 +200,37 @@ def evaluate(model, val_loader, device, epoch):
         zero_division=0
     ))
 
+def evaluate_with_loss(model, val_loader, device, epoch):
+    model.eval()
+    preds, true_labels = [], []
+    total_loss, steps = 0.0, 0
+    with torch.no_grad():
+        for batch in val_loader:
+            input_ids      = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            labels         = batch["labels"].to(device)
+            outputs        = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+                label_smoothing_factor=LABEL_SMOOTH,
+            )
+            total_loss    += outputs.loss.item()
+            steps         += 1
+            pred           = torch.argmax(outputs.logits, dim=-1).cpu().tolist()
+            preds.extend(pred)
+            true_labels.extend(batch["labels"].tolist())
+
+    val_loss = total_loss / max(steps, 1)
+    print(f"\n  [Epoch {epoch} 결과]")
+    print(classification_report(
+        true_labels, preds,
+        target_names=LABEL_NAMES,
+        zero_division=0
+    ))
+    print(f"  Validation loss: {val_loss:.4f}")
+    return val_loss
+
 
 # ────────────────────────────────────────────
 # 학습 메인
@@ -194,6 +241,7 @@ def train():
     print("  KoBERT 광고 의심도 분류기 학습 시작 (GPU 최적화)")
     print("=" * 55)
 
+    set_seed(SEED)
     device = get_device()
 
     # 데이터 준비
@@ -225,17 +273,22 @@ def train():
     # GPU면 num_workers 늘려서 데이터 로딩 병렬화
     num_workers = 4 if device.type == "cuda" else 0
 
+    generator = torch.Generator()
+    generator.manual_seed(SEED)
+
     train_dataset = AdDataset(train_df["text"], train_df["label"], tokenizer, MAX_LEN)
     val_dataset   = AdDataset(val_df["text"],   val_df["label"],   tokenizer, MAX_LEN)
     train_loader  = DataLoader(
-        train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers
+        train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers,
+        generator=generator
     )
     val_loader    = DataLoader(
-        val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers
+        val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers,
+        generator=generator
     )
 
     # Optimizer & Scheduler
-    optimizer    = AdamW(model.parameters(), lr=LR)
+    optimizer    = AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     total_steps  = len(train_loader) * (EPOCHS - start_epoch)
     scheduler    = get_linear_schedule_with_warmup(
         optimizer,
@@ -258,6 +311,8 @@ def train():
     print()
 
     total_start = time.time()
+    best_val_loss = float("inf")
+    patience = 0
 
     for epoch in range(start_epoch + 1, EPOCHS + 1):
         model.train()
@@ -271,7 +326,8 @@ def train():
             attention_mask = batch["attention_mask"].to(device)
             labels         = batch["labels"].to(device)
 
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels,
+                                   label_smoothing_factor=LABEL_SMOOTH)
             loss    = outputs.loss
             loss.backward()
 
@@ -298,9 +354,22 @@ def train():
               f"평균 Loss: {total_loss/steps_per_epoch:.4f} | "
               f"소요: {epoch_time/60:.1f}분")
 
-        evaluate(model, val_loader, device, epoch)
-        save_checkpoint(model, tokenizer, optimizer, scheduler, epoch,
-                        total_loss / steps_per_epoch)
+        val_loss = evaluate_with_loss(model, val_loader, device, epoch)
+
+        if val_loss + 1e-4 < best_val_loss:
+            best_val_loss = val_loss
+            patience = 0
+            save_checkpoint(
+                model, tokenizer, optimizer, scheduler, epoch,
+                total_loss / steps_per_epoch
+            )
+            print("  Validation improved -> checkpoint saved.")
+        else:
+            patience += 1
+            print(f"  No improvement ({patience}/{EARLY_STOP_PATIENCE})")
+            if patience >= EARLY_STOP_PATIENCE:
+                print("  Early stopping triggered.")
+                break
 
     # 최종 모델 저장
     total_time = time.time() - total_start
