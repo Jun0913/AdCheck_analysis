@@ -64,6 +64,7 @@ def _build_kobert_reason(level: SuspicionLevel, rule_result: SentenceResult, wei
         )
 
 MODEL_PATH = os.getenv("KOBERT_MODEL_PATH", "models/kobert_ad_classifier")
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _tokenizer = None
 _model = None
 
@@ -77,7 +78,7 @@ def _load_model():
         return False
     try:
         _tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-        _model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH)
+        _model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH).to(DEVICE)
         _model.eval()
         return True
     except Exception as e:
@@ -88,14 +89,10 @@ def _load_model():
 async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> SentenceResult:
     """
     2차 KoBERT 분석.
-    역할: 규칙기반이 '정상'으로 분류한 문장만 재검토.
-    - 규칙기반이 이미 주의/의심으로 잡은 문장은 그대로 반환 (KoBERT 불필요)
-    - 규칙기반이 정상으로 분류한 문장만 KoBERT가 재검토해서 놓친 게 있으면 보완
+    - 규칙기반 결과와 관계없이 모든 문장을 KoBERT로 최종 판단
+    - 규칙기반은 키워드/패턴 탐지 역할, KoBERT는 문맥 기반 최종 의심도 결정
+    - 단, KoBERT 모델이 없으면 규칙기반 결과를 그대로 반환
     """
-    # 규칙기반이 이미 주의/의심 → KoBERT 건너뜀
-    if rule_result.suspicion_level != SuspicionLevel.NORMAL:
-        return rule_result
-
     if not _load_model():
         return rule_result
 
@@ -107,7 +104,8 @@ async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> Sen
             padding=True,
             max_length=128,
         )
-        with torch.no_grad():
+        inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
+        with torch.inference_mode():
             outputs = _model(**inputs)
             logits = outputs.logits
             probs = torch.softmax(logits, dim=-1)[0]  # [정상, 주의, 의심] 확률
@@ -122,25 +120,47 @@ async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> Sen
         weighted_score = (prob_caution * 0.5) + (prob_suspicious * 1.0)
 
         # ── 가중 점수 → 의심도 레벨 변환 ────────────────────
-        # 규칙기반이 정상으로 분류한 문장을 검토하는 거라
-        # 임계값을 높게 잡아 확실한 경우만 의심/주의로 올림
-        if weighted_score >= 0.70:
-            kobert_level = SuspicionLevel.SUSPICIOUS
-        elif weighted_score >= 0.45:
-            kobert_level = SuspicionLevel.CAUTION
+        # 규칙기반 결과에 따라 임계값 차등 적용
+        # - 규칙기반이 의심: KoBERT가 확인/하향 조정
+        # - 규칙기반이 주의: KoBERT가 올리거나 내릴 수 있음
+        # - 규칙기반이 정상: KoBERT 임계값 높여서 과탐지 방지
+        if rule_result.suspicion_level == SuspicionLevel.SUSPICIOUS:
+            # 규칙기반이 의심 → KoBERT가 정상이어도 최소 주의 유지
+            if weighted_score >= 0.40:
+                kobert_level = SuspicionLevel.SUSPICIOUS
+            else:
+                kobert_level = SuspicionLevel.CAUTION
+        elif rule_result.suspicion_level == SuspicionLevel.CAUTION:
+            # 규칙기반이 주의 → KoBERT가 올릴 수도 내릴 수도 있음
+            if weighted_score >= 0.55:
+                kobert_level = SuspicionLevel.SUSPICIOUS
+            elif weighted_score >= 0.20:
+                kobert_level = SuspicionLevel.CAUTION
+            else:
+                kobert_level = SuspicionLevel.NORMAL
         else:
-            kobert_level = SuspicionLevel.NORMAL
+            # 규칙기반이 정상 → KoBERT 임계값 높게 설정 (과탐지 방지)
+            if weighted_score >= 0.70:
+                kobert_level = SuspicionLevel.SUSPICIOUS
+            elif weighted_score >= 0.45:
+                kobert_level = SuspicionLevel.CAUTION
+            else:
+                kobert_level = SuspicionLevel.NORMAL
 
-        # 정상 문장 재검토이므로 KoBERT가 정상이면 그대로 정상
-        # KoBERT가 주의/의심이면 그 결과 채택
-        if kobert_level == SuspicionLevel.NORMAL:
-            return rule_result
+        # ── 최종 결과 반환 ────────────────────────────────────
+        # KoBERT 결과가 규칙기반과 다르면 KoBERT 결과 채택 + 이유 생성
+        # KoBERT 결과가 같으면 규칙기반 이유 그대로 유지
+        if kobert_level != rule_result.suspicion_level:
+            reason = _build_kobert_reason(kobert_level, rule_result, weighted_score)
+            print(f"[KoBERT] 룰엔진:{rule_result.suspicion_level.name} -> KoBERT:{kobert_level.name} ({weighted_score:.2f})")
+        else:
+            reason = rule_result.reason
 
         return SentenceResult(
             sentence=sentence,
             suspicion_level=kobert_level,
             matched_keywords=rule_result.matched_keywords,
-            reason=_build_kobert_reason(kobert_level, rule_result, weighted_score),
+            reason=reason,
         )
 
     except Exception as e:
