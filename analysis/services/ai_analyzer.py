@@ -8,6 +8,7 @@ import os
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from analysis.models.schemas import SentenceResult, SuspicionLevel
+from analysis.services.nli_verifier import verify_with_nli
 
 # ────────────────────────────────────────────
 # 라벨 매핑: 학습 시 정의한 순서와 반드시 일치해야 함
@@ -156,12 +157,26 @@ async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> Sen
         else:
             reason = rule_result.reason
 
-        return SentenceResult(
+        kobert_result = SentenceResult(
             sentence=sentence,
             suspicion_level=kobert_level,
             matched_keywords=rule_result.matched_keywords,
+            matched_patterns=rule_result.matched_patterns,
             reason=reason,
+            score=round(weighted_score, 3),
         )
+
+        # ── 3차: NLI 검증 ──────────────────────────────────────
+        # 조건: 규칙 엔진이 패턴을 감지했고 KoBERT 점수가 회색지대(0.35~0.65)이거나
+        #       규칙 엔진·KoBERT 결과가 엇갈릴 때
+        should_call_nli = bool(rule_result.matched_patterns) and (
+            0.35 <= weighted_score <= 0.65
+            or rule_result.suspicion_level != kobert_level
+        )
+        if should_call_nli:
+            return verify_with_nli(sentence, kobert_result, rule_result.matched_patterns)
+
+        return kobert_result
 
     except Exception as e:
         print(f"[KoBERT] 추론 오류: {e}")
