@@ -27,9 +27,12 @@ import os
 import glob
 import time
 import random
+import shutil
+import argparse
 import numpy as np
 import pandas as pd
 import torch
+from datetime import datetime
 from torch.utils.data import Dataset, DataLoader
 from transformers import (
     AutoTokenizer,
@@ -54,7 +57,8 @@ NUM_LABELS  = 3
 MAX_LEN     = 128   # GPU: 128 (CPU보다 길게 잡아도 빠름)
 BATCH_SIZE  = 32    # GPU: 32 (VRAM 4GB↑ 기준, 부족하면 16으로)
 EPOCHS      = 5     # GPU: 5 (CPU보다 여유 있게)
-LR          = 2e-5
+LR           = 2e-5
+FINETUNE_LR  = 1e-5  # 추가학습 시 낮은 학습률 (기존 지식 보존)
 WEIGHT_DECAY = 1e-2  # AdamW L2 regularization to reduce overfitting
 LABEL_SMOOTH = 0.1   # Softens hard labels to improve generalization
 EARLY_STOP_PATIENCE = 2  # Stop if val loss does not improve for N epochs
@@ -233,12 +237,48 @@ def evaluate_with_loss(model, val_loader, device, epoch):
 
 
 # ────────────────────────────────────────────
+# CLI 인자
+# ────────────────────────────────────────────
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="KoBERT 광고 의심도 분류기 학습",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument(
+        "--scratch",
+        action="store_true",
+        help="base KoBERT(skt/kobert-base-v1)부터 새로 학습\n(기본값: 기존 저장 모델에서 추가학습)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="이전 체크포인트에서 이어서 학습 (학습 중단 시 복구용)",
+    )
+    parser.add_argument("--epochs", type=int, default=None, help=f"에폭 수 (기본값: {EPOCHS})")
+    parser.add_argument("--lr",     type=float, default=None, help="학습률 (기본값: 모드에 따라 자동 설정)")
+    return parser.parse_args()
+
+
+# ────────────────────────────────────────────
 # 학습 메인
 # ────────────────────────────────────────────
 
 def train():
+    args   = parse_args()
+    epochs = args.epochs or EPOCHS
+
+    # 학습률: scratch면 2e-5, finetune이면 1e-5, 직접 지정 시 그값
+    if args.lr:
+        lr = args.lr
+    elif args.scratch:
+        lr = LR
+    else:
+        lr = FINETUNE_LR
+
     print("\n" + "=" * 55)
-    print("  KoBERT 광고 의심도 분류기 학습 시작 (GPU 최적화)")
+    mode_label = "새로 학습 (scratch)" if args.scratch else "추가학습 (finetune)"
+    print(f"  KoBERT 광고 의심도 분류기 — {mode_label}")
     print("=" * 55)
 
     set_seed(SEED)
@@ -252,21 +292,37 @@ def train():
     )
     print(f"\n  학습: {len(train_df)}행 / 검증: {len(val_df)}행")
 
-    # 체크포인트 확인
+    # ── 모델 로드 우선순위 ──────────────────────────────────
+    # 1순위: --resume 플래그 + 체크포인트 존재 (중단된 세션 복구)
+    # 2순위: 기존 저장 모델 kobert_ad_classifier (finetune 기본 동작)
+    # 3순위: base KoBERT (--scratch 또는 저장 모델 없음)
     ckpt_path, start_epoch = find_latest_checkpoint()
-    if ckpt_path:
-        print(f"\n  이전 체크포인트 발견 (Epoch {start_epoch}): {ckpt_path}")
-        print(f"  Epoch {start_epoch + 1}부터 이어서 학습합니다.")
+
+    if args.resume and ckpt_path:
+        print(f"\n  [resume] 체크포인트에서 복구 (Epoch {start_epoch}): {ckpt_path}")
         tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
         model     = AutoModelForSequenceClassification.from_pretrained(
             ckpt_path, num_labels=NUM_LABELS
         )
+    elif not args.scratch and os.path.exists(MODEL_SAVE_PATH):
+        print(f"\n  [finetune] 기존 모델에서 추가학습: {MODEL_SAVE_PATH}")
+        print(f"  학습률: {lr} (기존 지식 보존을 위해 낮게 설정)")
+        tokenizer   = AutoTokenizer.from_pretrained(MODEL_SAVE_PATH)
+        model       = AutoModelForSequenceClassification.from_pretrained(
+            MODEL_SAVE_PATH, num_labels=NUM_LABELS
+        )
+        start_epoch = 0
     else:
-        print(f"\n  모델 로드: {BASE_MODEL}")
-        tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL)
-        model     = AutoModelForSequenceClassification.from_pretrained(
+        if not args.scratch:
+            print(f"\n  저장된 모델 없음 → base KoBERT에서 새로 학습")
+        else:
+            print(f"\n  [scratch] base KoBERT에서 새로 학습: {BASE_MODEL}")
+        print(f"  학습률: {lr}")
+        tokenizer   = AutoTokenizer.from_pretrained(BASE_MODEL)
+        model       = AutoModelForSequenceClassification.from_pretrained(
             BASE_MODEL, num_labels=NUM_LABELS
         )
+        start_epoch = 0
 
     model.to(device)
 
@@ -288,15 +344,15 @@ def train():
     )
 
     # Optimizer & Scheduler
-    optimizer    = AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    total_steps  = len(train_loader) * (EPOCHS - start_epoch)
+    optimizer    = AdamW(model.parameters(), lr=lr, weight_decay=WEIGHT_DECAY)
+    total_steps  = len(train_loader) * (epochs - start_epoch)
     scheduler    = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=total_steps // 10,
         num_training_steps=total_steps,
     )
 
-    if ckpt_path:
+    if args.resume and ckpt_path:
         state = torch.load(
             os.path.join(ckpt_path, "trainer_state.pt"), map_location=device
         )
@@ -305,16 +361,16 @@ def train():
 
     steps_per_epoch = len(train_loader)
     print(f"\n  배치 크기: {BATCH_SIZE} / 에폭당 스텝: {steps_per_epoch}")
-    print(f"  남은 에폭: {EPOCHS - start_epoch}개")
+    print(f"  남은 에폭: {epochs - start_epoch}개")
     if device.type == "cuda":
-        print(f"  GPU 학습 예상 시간: 에폭당 약 1~3분 (총 {(EPOCHS - start_epoch) * 3}분 이내)")
+        print(f"  GPU 학습 예상 시간: 에폭당 약 1~3분 (총 {(epochs - start_epoch) * 3}분 이내)")
     print()
 
     total_start = time.time()
     best_val_loss = float("inf")
     patience = 0
 
-    for epoch in range(start_epoch + 1, EPOCHS + 1):
+    for epoch in range(start_epoch + 1, epochs + 1):
         model.train()
         total_loss  = 0.0
         epoch_start = time.time()
@@ -341,7 +397,7 @@ def train():
                 eta      = elapsed / step * (steps_per_epoch - step)
                 avg_loss = total_loss / step
                 print(
-                    f"\r  Epoch {epoch}/{EPOCHS} | "
+                    f"\r  Epoch {epoch}/{epochs} | "
                     f"Step {step}/{steps_per_epoch} | "
                     f"Loss: {avg_loss:.4f} | "
                     f"경과: {elapsed/60:.1f}분 | "
@@ -371,8 +427,15 @@ def train():
                 print("  Early stopping triggered.")
                 break
 
-    # 최종 모델 저장
+    # 최종 모델 저장 (이전 모델은 백업)
     total_time = time.time() - total_start
+    backup_path = MODEL_SAVE_PATH + "_prev"
+    if os.path.exists(MODEL_SAVE_PATH):
+        if os.path.exists(backup_path):
+            shutil.rmtree(backup_path)
+        shutil.copytree(MODEL_SAVE_PATH, backup_path)
+        print(f"\n  이전 모델 백업: {backup_path}")
+
     os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
     model.save_pretrained(MODEL_SAVE_PATH)
     tokenizer.save_pretrained(MODEL_SAVE_PATH)
@@ -381,6 +444,7 @@ def train():
     print(f"  학습 완료!")
     print(f"  총 소요 시간: {total_time/60:.1f}분")
     print(f"  최종 모델 저장: {MODEL_SAVE_PATH}")
+    print(f"  이전 모델 백업: {backup_path}")
     print(f"{'=' * 55}\n")
 
 
