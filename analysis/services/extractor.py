@@ -1,17 +1,31 @@
 import httpx
 from bs4 import BeautifulSoup
 from PIL import Image
-import pytesseract
 import io
 import re
 import os
 from urllib.parse import urlparse
 
-# Tesseract 경로 설정
-# Windows 로컬 개발 환경
-if os.name == 'nt':
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-# Linux 배포 환경: 별도 설정 불필요 (apt로 설치하면 /usr/bin/tesseract에 자동 위치)
+try:
+    import easyocr
+    _EASYOCR_AVAILABLE = True
+except ImportError:
+    _EASYOCR_AVAILABLE = False
+
+_easyocr_reader = None
+
+
+def _get_easyocr_reader() -> "easyocr.Reader":
+    global _easyocr_reader
+    if _easyocr_reader is None:
+        try:
+            import torch
+            use_gpu = torch.cuda.is_available()
+        except ImportError:
+            use_gpu = False
+        _easyocr_reader = easyocr.Reader(["ko", "en"], gpu=use_gpu)
+    return _easyocr_reader
+
 
 try:
     import kss
@@ -26,7 +40,6 @@ except ImportError:
     _PLAYWRIGHT_AVAILABLE = False
 
 # ── 로그인 필요 사이트 (Playwright로도 불가) ──────────────────
-# 로그인 없이는 어떤 방법으로도 크롤링 불가한 사이트
 LOGIN_REQUIRED_DOMAINS = {
     "youtube.com":   "유튜브는 크롤링이 차단되어 있습니다. 영상 설명란 텍스트를 복사해서 텍스트 분석을 이용해주세요.",
     "youtu.be":      "유튜브는 크롤링이 차단되어 있습니다. 영상 설명란 텍스트를 복사해서 텍스트 분석을 이용해주세요.",
@@ -36,7 +49,6 @@ LOGIN_REQUIRED_DOMAINS = {
 }
 
 # ── Playwright로 재시도할 사이트 (JS 렌더링 필요) ──────────────
-# httpx로 1차 시도 후 텍스트가 부족하면 Playwright로 재시도
 PLAYWRIGHT_DOMAINS = {
     "coupang.com",
     "smartstore.naver.com",
@@ -66,14 +78,11 @@ def _get_domain(url: str) -> str:
 
 def _normalize_url(url: str) -> str:
     """네이버 블로그 등 본문 접근이 어려운 URL을 크롤링 친화적으로 변환"""
-    # 네이버 블로그: 모바일 버전이 본문 추출 훨씬 용이
     if "blog.naver.com" in url:
-        # /PostView.naver?blogId=xxx&logNo=yyy → m.blog.naver.com/xxx/yyy
         import re as _re
         m = _re.search(r'blogId=([^&]+)&logNo=(\d+)', url)
         if m:
             return f"https://m.blog.naver.com/{m.group(1)}/{m.group(2)}"
-        # 이미 /blogId/logNo 형태면 모바일로만 변환
         url = url.replace("blog.naver.com", "m.blog.naver.com")
     return url
 
@@ -95,13 +104,11 @@ def _needs_playwright(url: str) -> bool:
 
 def _extract_main_text(soup: BeautifulSoup, domain: str) -> str:
     """사이트별 선택자로 본문 추출, 없으면 전체 텍스트 추출"""
-    # 공통 제거 태그 — 네비게이션, UI 요소 포함
     for tag in soup(["script", "style", "nav", "footer", "header",
                      "aside", "iframe", "noscript", "svg",
                      "button", "input", "select", "form"]):
         tag.decompose()
 
-    # 네이버 블로그 UI 요소 추가 제거
     for selector in [
         ".blog_menu", ".gnb", ".lnb", ".snb",
         ".post_menu", ".post_toolbar", ".post_share",
@@ -113,7 +120,6 @@ def _extract_main_text(soup: BeautifulSoup, domain: str) -> str:
         for el in soup.select(selector):
             el.decompose()
 
-    # 사이트별 선택자 시도
     selectors = SITE_SELECTORS.get(domain, []) + SITE_SELECTORS["default"]
     for selector in selectors:
         element = soup.select_one(selector)
@@ -122,16 +128,14 @@ def _extract_main_text(soup: BeautifulSoup, domain: str) -> str:
             if len(text.strip()) > 100:
                 return text.strip()
 
-    # 선택자 실패 → 전체 텍스트
     return soup.get_text(separator="\n").strip()
 
 
 def _clean_text(text: str) -> str:
     """추출된 텍스트 정리"""
-    text = re.sub(r"\n{3,}", "\n\n", text)   # 연속 빈줄 제거
-    text = re.sub(r" {2,}", " ", text)         # 연속 공백 제거
-    text = re.sub(r"\t+", " ", text)           # 탭 제거
-    # 1글자짜리 잡음만 제거 (기존 2글자 → 1글자로 완화)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r" {2,}", " ", text)
+    text = re.sub(r"\t+", " ", text)
     lines = [line.strip() for line in text.split("\n") if len(line.strip()) > 1]
     return "\n".join(lines)
 
@@ -141,20 +145,15 @@ async def extract_from_url(url: str) -> str:
     1단계: httpx + BeautifulSoup (빠름, 최대 8초)
     2단계: Playwright 재시도 필요한 사이트만 (JS 렌더링, 최대 15초)
     """
-
-    # 로그인 필요 사이트 체크
     login_msg = _check_login_required(url)
     if login_msg:
         raise ValueError(login_msg)
 
-    # Playwright 필요 사이트는 바로 Playwright로
     if _needs_playwright(url) and _PLAYWRIGHT_AVAILABLE:
         text = await _extract_with_playwright(url)
     else:
-        # 1단계: httpx로 빠르게 시도
         text = await _extract_with_httpx(url)
 
-        # 2단계: 텍스트가 너무 적고 Playwright 가능하면 재시도
         if len(text) < 200 and _PLAYWRIGHT_AVAILABLE:
             playwright_text = await _extract_with_playwright(url)
             if len(playwright_text) > len(text):
@@ -171,7 +170,7 @@ async def extract_from_url(url: str) -> str:
 
 async def _extract_with_httpx(url: str) -> str:
     """httpx + BeautifulSoup으로 텍스트 추출 (1단계)"""
-    url = _normalize_url(url)  # 네이버 블로그 등 URL 변환
+    url = _normalize_url(url)
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -186,7 +185,7 @@ async def _extract_with_httpx(url: str) -> str:
 
     try:
         async with httpx.AsyncClient(
-            timeout=8.0,  # 20초 → 8초로 단축
+            timeout=8.0,
             headers=headers,
             follow_redirects=True,
         ) as client:
@@ -224,7 +223,6 @@ async def _extract_with_playwright(url: str) -> str:
             )
             page = await context.new_page()
 
-            # 이미지, 폰트, 미디어 차단 (속도 향상)
             await page.route(
                 "**/*.{png,jpg,jpeg,gif,svg,woff,woff2,ttf,otf,mp4,mp3,webp}",
                 lambda r: r.abort()
@@ -232,11 +230,10 @@ async def _extract_with_playwright(url: str) -> str:
 
             await page.goto(url, timeout=12000, wait_until="domcontentloaded")
 
-            # 고정 대기 제거 → 네트워크 안정화 대기로 교체 (더 빠름)
             try:
                 await page.wait_for_load_state("networkidle", timeout=3000)
             except Exception:
-                pass  # timeout 나도 현재 상태로 진행
+                pass
 
             html = await page.content()
             await browser.close()
@@ -251,10 +248,20 @@ async def _extract_with_playwright(url: str) -> str:
 
 
 def extract_from_image(image_bytes: bytes) -> str:
-    """이미지에서 OCR로 텍스트 추출 (한국어 + 영어)"""
-    image = Image.open(io.BytesIO(image_bytes))
-    text = pytesseract.image_to_string(image, lang="kor+eng")
-    return text.strip()
+    """이미지에서 EasyOCR로 텍스트 추출 (한국어 + 영어)"""
+    if not _EASYOCR_AVAILABLE:
+        raise RuntimeError("EasyOCR가 설치되어 있지 않습니다. pip install easyocr 를 실행하세요.")
+    try:
+        reader = _get_easyocr_reader()
+        result = reader.readtext(image_bytes)
+        if not result:
+            return ""
+        # 위→아래, 왼→오른쪽 순으로 정렬 (bbox 좌상단 기준)
+        result.sort(key=lambda x: (x[0][0][1], x[0][0][0]))
+        lines = [item[1] for item in result if item[2] > 0.3]
+        return "\n".join(lines).strip()
+    except Exception as e:
+        raise RuntimeError(f"이미지 텍스트 추출 실패: {e}")
 
 
 def split_sentences(text: str) -> list[str]:
