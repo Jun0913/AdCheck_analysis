@@ -24,7 +24,9 @@ class SentenceResult(BaseModel):
     sentence: str
     suspicion_level: SuspicionLevel
     matched_keywords: List[str]
+    matched_patterns: List[str] = []  # 규칙 엔진이 감지한 패턴 태그 (NLI 가설 선택용)
     reason: str
+    score: float = 0.0  # 0.0 ~ 1.0 연속 의심도 점수 (KoBERT weighted_score 기반)
 
 
 class AnalyzeResponse(BaseModel):
