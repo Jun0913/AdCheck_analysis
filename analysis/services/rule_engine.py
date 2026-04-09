@@ -194,6 +194,38 @@ FORBIDDEN_KEYWORDS: dict[str, list[str]] = {
 # 주의 키워드 (과장 가능성 있으나 단정 어려운 표현)
 # ────────────────────────────────────────────
 
+# ────────────────────────────────────────────
+# 화장품 도메인 명사 (관련성 필터)
+# 이 중 하나라도 포함돼야 분석 대상으로 처리
+# 해당 명사가 없는 문장은 화장품 광고와 무관한 것으로 보고 정상 처리
+# ────────────────────────────────────────────
+
+COSMETIC_DOMAIN_NOUNS: frozenset[str] = frozenset({
+    # 제품 종류
+    "크림", "로션", "세럼", "앰플", "에센스", "토너", "스킨", "미스트",
+    "선크림", "선스크린", "선블록", "클렌저", "클렌징", "폼클렌징",
+    "마스크팩", "시트마스크", "팩", "아이크림", "립밤", "립크림",
+    "파운데이션", "비비크림", "쿠션", "컨실러", "파우더",
+    "샴푸", "컨디셔너", "트리트먼트", "헤어에센스", "헤어오일",
+    "바디로션", "바디크림", "바디워시",
+    # 화장품·뷰티 범주어
+    "화장품", "뷰티", "스킨케어", "기초화장품", "색조화장품",
+    "메이크업", "코스메틱", "화장",
+    # 피부·두피·모발
+    "피부", "두피", "모발", "모공", "주름", "미백", "보습",
+    "탄력", "피부톤", "피부결", "피부장벽", "각질", "탈모",
+    # 성분·제형
+    "성분", "제형", "함유", "원료", "추출물",
+    # 기능성
+    "자외선차단", "기능성화장품",
+})
+
+
+def is_cosmetic_related(sentence: str) -> bool:
+    """화장품·뷰티 도메인과 관련된 문장인지 확인"""
+    return any(noun in sentence for noun in COSMETIC_DOMAIN_NOUNS)
+
+
 CAUTION_KEYWORDS: list[str] = [
     # 재생·회복 계열
     "재생", "피부 재생", "손상 회복", "피부 회복",
@@ -242,15 +274,27 @@ def analyze_sentence(sentence: str) -> SentenceResult:
     """1차 규칙기반 엔진: 문장 하나를 분석하여 SentenceResult 반환"""
 
     # ── 화이트리스트 체크 ───────────────────────────────────
-    # 허용 표현이 포함된 문장은 정상으로 처리
     for wl_kw in WHITELIST_KEYWORDS:
         if wl_kw in sentence:
             return SentenceResult(
                 sentence=sentence,
                 suspicion_level=SuspicionLevel.NORMAL,
                 matched_keywords=[],
+                matched_patterns=[],
                 reason="허용된 표현이 포함되어 있습니다.",
+                score=0.0,
             )
+
+    # ── 도메인 관련성 필터 ─────────────────────────────────
+    if not is_cosmetic_related(sentence):
+        return SentenceResult(
+            sentence=sentence,
+            suspicion_level=SuspicionLevel.NORMAL,
+            matched_keywords=[],
+            matched_patterns=[],
+            reason="화장품·뷰티 광고와 관련 없는 문구입니다.",
+            score=0.0,
+        )
 
     matched_keywords: list[str] = []
     matched_patterns: list[str] = []
@@ -267,23 +311,30 @@ def analyze_sentence(sentence: str) -> SentenceResult:
     caution_matches = [kw for kw in CAUTION_KEYWORDS if kw in sentence]
     matched_keywords.extend(caution_matches)
 
-    # 의심도 결정
+    # 의심도 결정 + 규칙 기반 연속 점수
     if matched_patterns:
         level = SuspicionLevel.SUSPICIOUS
+        # 패턴 수에 따라 점수 차등 (0.70 ~ 0.90)
+        base_score = round(min(0.70 + len(matched_patterns) * 0.05, 0.90), 3)
         reason = _build_reason(matched_patterns, matched_keywords)
     elif caution_matches:
         level = SuspicionLevel.CAUTION
+        # 주의 키워드 수에 따라 점수 차등 (0.35 ~ 0.55)
+        base_score = round(min(0.35 + len(caution_matches) * 0.05, 0.55), 3)
         kw_display = ", ".join(f"'{kw}'" for kw in caution_matches[:3])
         reason = f"{kw_display} 표현은 효과를 과장하거나 오인을 유발할 가능성이 있어 주의가 필요합니다."
     else:
         level = SuspicionLevel.NORMAL
+        base_score = 0.0
         reason = "특별히 의심되는 표현이 발견되지 않았습니다."
 
     return SentenceResult(
         sentence=sentence,
         suspicion_level=level,
         matched_keywords=list(set(matched_keywords)),
+        matched_patterns=matched_patterns,
         reason=reason,
+        score=base_score,
     )
 
 
@@ -333,24 +384,30 @@ def _build_reason(patterns: list[str], keywords: list[str]) -> str:
 
 
 def calculate_overall_score(results: list[SentenceResult]) -> tuple[float, SuspicionLevel]:
-    """전체 의심도 점수 및 레벨 계산"""
+    """전체 의심도 점수 및 레벨 계산 (연속 점수 기반 가중 평균)"""
     if not results:
         return 0.0, SuspicionLevel.NORMAL
 
-    score_map = {
-        SuspicionLevel.NORMAL:     0.0,
-        SuspicionLevel.CAUTION:    0.5,
-        SuspicionLevel.SUSPICIOUS: 1.0,
-    }
+    scores = sorted([r.score for r in results], reverse=True)
+    n = len(scores)
 
-    total = sum(score_map[r.suspicion_level] for r in results)
-    avg_score = total / len(results)
+    # 상위 1/3 문장에 가중치 2배 → 의심 문장이 전체 점수에 확실히 반영
+    k = max(1, n // 3)
+    weighted_sum = sum(scores[:k]) * 2.0 + sum(scores[k:])
+    total_weight = k * 2.0 + (n - k)
+    overall = weighted_sum / total_weight
 
-    if avg_score >= 0.6:
+    # 레벨 결정
+    if overall >= 0.55:
         level = SuspicionLevel.SUSPICIOUS
-    elif avg_score >= 0.3:
+    elif overall >= 0.20:
         level = SuspicionLevel.CAUTION
     else:
         level = SuspicionLevel.NORMAL
 
-    return round(avg_score, 2), level
+    # 고신뢰 의심 문장(score >= 0.80, 패턴 2개 이상)이 있으면 최소 주의 보장
+    if any(r.suspicion_level == SuspicionLevel.SUSPICIOUS and r.score >= 0.80 for r in results):
+        if level == SuspicionLevel.NORMAL:
+            level = SuspicionLevel.CAUTION
+
+    return round(overall, 3), level
