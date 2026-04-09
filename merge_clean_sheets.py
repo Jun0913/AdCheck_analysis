@@ -280,10 +280,43 @@ def merge_clean_sheets(
     # 요약 출력
     print_summary(merged, source_counts)
 
-    # 출력 파일 저장 (고정 파일명으로 덮어쓰기)
+    # 출력 파일 저장
     os.makedirs(MERGED_DIR, exist_ok=True)
     if output_path is None:
         output_path = os.path.join(MERGED_DIR, "merged_clean.csv")
+
+    # 기존 merged_clean.csv가 있으면 추가 병합
+    if os.path.exists(output_path):
+        try:
+            existing = pd.read_csv(output_path, encoding="utf-8-sig", dtype=str)
+            existing.columns = existing.columns.str.strip()
+            existing_count = len(existing)
+            merged = pd.concat([existing, merged], ignore_index=True)
+            print(f"📂 기존 파일 감지: {existing_count}행 + 새 데이터 추가 후 중복 제거 진행")
+
+            # 컬럼 순서 재정렬
+            ordered_cols = [c for c in EXPECTED_COLUMNS if c in merged.columns]
+            extra_cols = [c for c in merged.columns if c not in EXPECTED_COLUMNS]
+            if not keep_source_col and "_source_file" in extra_cols:
+                extra_cols.remove("_source_file")
+            merged = merged[ordered_cols + extra_cols]
+
+            # 중복 재제거
+            if dedup and "정제 ID" in merged.columns:
+                before = len(merged)
+                merged = merged.drop_duplicates(subset=["정제 ID"], keep="first")
+                removed = before - len(merged)
+                if removed > 0:
+                    print(f"   [중복 제거 - ID] {removed}행 제거")
+            if dedup:
+                merged, removed_content = dedup_by_content(merged)
+                if removed_content > 0:
+                    print(f"   [중복 제거 - 문구] {removed_content}행 제거")
+
+            # NA 재정규화
+            merged = merged.fillna("NA").replace("", "NA")
+        except Exception as e:
+            print(f"⚠️  기존 파일 읽기 실패, 새로 생성합니다: {e}")
 
     merged.to_csv(output_path, index=False, encoding="utf-8-sig")
     print(f"💾 저장 완료: {os.path.abspath(output_path)}")
