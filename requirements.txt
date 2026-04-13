@@ -23,14 +23,14 @@ kss==4.5.4
 #   CUDA 버전 확인: nvidia-smi
 #
 #   CUDA 12.4: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-#   CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#   CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121어나더
 #   CUDA 11.8: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 #   CPU 전용:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 #
 #   설치 확인: python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-#
 # ⚠️ playwright 설치 후 브라우저도 별도 설치 필요
 #   python -m playwright install chromium
+
 transformers>=4.40.0
 scikit-learn>=1.4.0
 pandas>=2.0.0

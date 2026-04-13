@@ -34,6 +34,7 @@ import pandas as pd
 import torch
 from datetime import datetime
 from torch.utils.data import Dataset, DataLoader
+from torch.cuda.amp import autocast, GradScaler
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
@@ -42,6 +43,7 @@ from transformers import (
 from torch.optim import AdamW
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
+from eval import evaluate_and_save
 
 # ────────────────────────────────────────────
 # 설정
@@ -54,9 +56,9 @@ MODEL_SAVE_PATH = "models/kobert_ad_classifier"
 CKPT_DIR        = "models/checkpoints_kobert"
 
 NUM_LABELS  = 3
-MAX_LEN     = 128   # GPU: 128 (CPU보다 길게 잡아도 빠름)
+MAX_LEN     = 96    # 짧은 광고 문구에 맞춰 길이 단축 (속도 ↑, 영향 미미)
 BATCH_SIZE  = 32    # GPU: 32 (VRAM 4GB↑ 기준, 부족하면 16으로)
-EPOCHS      = 5     # GPU: 5 (CPU보다 여유 있게)
+EPOCHS      = 3     # 기본 에폭 축소로 학습 시간 단축
 LR           = 2e-5
 FINETUNE_LR  = 1e-5  # 추가학습 시 낮은 학습률 (기존 지식 보존)
 WEIGHT_DECAY = 1e-2  # AdamW L2 regularization to reduce overfitting
@@ -257,6 +259,16 @@ def parse_args():
     )
     parser.add_argument("--epochs", type=int, default=None, help=f"에폭 수 (기본값: {EPOCHS})")
     parser.add_argument("--lr",     type=float, default=None, help="학습률 (기본값: 모드에 따라 자동 설정)")
+    parser.add_argument(
+        "--no-eval",
+        action="store_true",
+        help="학습 종료 후 자동 검증/JSON 기록을 건너뜀",
+    )
+    parser.add_argument(
+        "--no-amp",
+        action="store_true",
+        help="GPU에서도 mixed precision(amp) 사용 안 함",
+    )
     return parser.parse_args()
 
 
@@ -267,6 +279,7 @@ def parse_args():
 def train():
     args   = parse_args()
     epochs = args.epochs or EPOCHS
+    amp_enabled = False
 
     # 학습률: scratch면 2e-5, finetune이면 1e-5, 직접 지정 시 그값
     if args.lr:
@@ -283,6 +296,7 @@ def train():
 
     set_seed(SEED)
     device = get_device()
+    amp_enabled = (device.type == "cuda") and (not args.no_amp)
 
     # 데이터 준비
     df = load_data(MERGED_PATH)
@@ -351,6 +365,7 @@ def train():
         num_warmup_steps=total_steps // 10,
         num_training_steps=total_steps,
     )
+    scaler = GradScaler(enabled=amp_enabled)
 
     if args.resume and ckpt_path:
         state = torch.load(
@@ -364,6 +379,10 @@ def train():
     print(f"  남은 에폭: {epochs - start_epoch}개")
     if device.type == "cuda":
         print(f"  GPU 학습 예상 시간: 에폭당 약 1~3분 (총 {(epochs - start_epoch) * 3}분 이내)")
+        if amp_enabled:
+            print("  AMP: on (mixed precision)")
+        else:
+            print("  AMP: off")
     print()
 
     total_start = time.time()
@@ -382,13 +401,19 @@ def train():
             attention_mask = batch["attention_mask"].to(device)
             labels         = batch["labels"].to(device)
 
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels,
-                                   label_smoothing_factor=LABEL_SMOOTH)
-            loss    = outputs.loss
-            loss.backward()
+            with autocast(enabled=amp_enabled):
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                    label_smoothing_factor=LABEL_SMOOTH,
+                )
+                loss = outputs.loss
 
+            scaler.scale(loss).backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
             total_loss += loss.item()
 
@@ -439,6 +464,26 @@ def train():
     os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
     model.save_pretrained(MODEL_SAVE_PATH)
     tokenizer.save_pretrained(MODEL_SAVE_PATH)
+
+    # Post-training evaluation (same fixed split, saved to reports/)
+    if not args.no_eval:
+        try:
+            print("\n  모델 저장 후 고정 검증셋 평가 중...")
+            _, metrics_path = evaluate_and_save(
+                model_dir=MODEL_SAVE_PATH,
+                data=MERGED_PATH,
+                seed=SEED,
+                test_size=0.2,
+                batch_size=BATCH_SIZE,
+                max_len=MAX_LEN,
+                output=None,
+                quiet=False,
+            )
+            print(f"  검증 지표 JSON: {metrics_path}")
+        except Exception as e:
+            print(f"  [경고] 자동 검증 실패: {e}")
+    else:
+        print("\n  (--no-eval) 자동 검증을 건너뜀")
 
     print(f"\n{'=' * 55}")
     print(f"  학습 완료!")
