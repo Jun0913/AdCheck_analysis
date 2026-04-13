@@ -98,6 +98,18 @@ async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> Sen
         return rule_result
 
     try:
+        # ── 짧은 문장 과탐지 방지 ─────────────────────────────
+        # 인사말/단어 수준(글자수<6 또는 단어≤2)이며 규칙 패턴이 없으면 바로 정상 처리
+        if (len(sentence.strip()) < 6 or len(sentence.split()) <= 2) and not rule_result.matched_patterns:
+            return SentenceResult(
+                sentence=sentence,
+                suspicion_level=SuspicionLevel.NORMAL,
+                matched_keywords=rule_result.matched_keywords,
+                matched_patterns=rule_result.matched_patterns,
+                reason="아주 짧은 일반 문구는 과탐지를 막기 위해 정상으로 처리했습니다.",
+                score=0.0,
+            )
+
         inputs = _tokenizer(
             sentence,
             return_tensors="pt",
@@ -116,9 +128,12 @@ async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> Sen
         prob_suspicious = probs[2].item()
 
         # ── 확률 가중 점수 계산 ───────────────────────────────
-        # 정상=0, 주의=0.5, 의심=1.0 으로 가중합산
-        # 각 라벨 확률을 반영해 부드럽게 의심도 산출
-        weighted_score = (prob_caution * 0.5) + (prob_suspicious * 1.0)
+        # 기본값을 낮춰 과탐지 완화: 주의는 0.3, 의심은 1.0
+        weighted_score = (prob_caution * 0.3) + (prob_suspicious * 1.0)
+
+        # 룰 패턴이 하나도 없으면 보수적으로 0.6배 클램프
+        if not rule_result.matched_patterns:
+            weighted_score *= 0.6
 
         # ── 가중 점수 → 의심도 레벨 변환 ────────────────────
         # 규칙기반 결과에 따라 임계값 차등 적용
@@ -126,24 +141,26 @@ async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> Sen
         # - 규칙기반이 주의: KoBERT가 올리거나 내릴 수 있음
         # - 규칙기반이 정상: KoBERT 임계값 높여서 과탐지 방지
         if rule_result.suspicion_level == SuspicionLevel.SUSPICIOUS:
-            # 규칙기반이 의심 → KoBERT가 정상이어도 최소 주의 유지
-            if weighted_score >= 0.40:
-                kobert_level = SuspicionLevel.SUSPICIOUS
-            else:
-                kobert_level = SuspicionLevel.CAUTION
-        elif rule_result.suspicion_level == SuspicionLevel.CAUTION:
-            # 규칙기반이 주의 → KoBERT가 올릴 수도 내릴 수도 있음
+            # 규칙기반이 의심 → KoBERT가 확인/하향 조정
             if weighted_score >= 0.55:
                 kobert_level = SuspicionLevel.SUSPICIOUS
-            elif weighted_score >= 0.20:
+            elif weighted_score >= 0.30:
+                kobert_level = SuspicionLevel.CAUTION
+            else:
+                kobert_level = SuspicionLevel.CAUTION  # 최소 주의 유지
+        elif rule_result.suspicion_level == SuspicionLevel.CAUTION:
+            # 규칙기반이 주의 → 올릴 수도 내릴 수도 있음 (보수적)
+            if weighted_score >= 0.60:
+                kobert_level = SuspicionLevel.SUSPICIOUS
+            elif weighted_score >= 0.30:
                 kobert_level = SuspicionLevel.CAUTION
             else:
                 kobert_level = SuspicionLevel.NORMAL
         else:
-            # 규칙기반이 정상 → KoBERT 임계값 높게 설정 (과탐지 방지)
-            if weighted_score >= 0.70:
+            # 규칙기반이 정상 → 임계값을 더 높여 과탐지 방지
+            if weighted_score >= 0.80:
                 kobert_level = SuspicionLevel.SUSPICIOUS
-            elif weighted_score >= 0.45:
+            elif weighted_score >= 0.55:
                 kobert_level = SuspicionLevel.CAUTION
             else:
                 kobert_level = SuspicionLevel.NORMAL
@@ -157,13 +174,16 @@ async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> Sen
         else:
             reason = rule_result.reason
 
+        # 정상으로 확정되면 점수를 0으로 리셋해 전체 점수에 영향 없도록
+        final_score = 0.0 if kobert_level == SuspicionLevel.NORMAL else round(weighted_score, 3)
+
         kobert_result = SentenceResult(
             sentence=sentence,
             suspicion_level=kobert_level,
             matched_keywords=rule_result.matched_keywords,
             matched_patterns=rule_result.matched_patterns,
             reason=reason,
-            score=round(weighted_score, 3),
+            score=final_score,
         )
 
         # ── 3차: NLI 검증 ──────────────────────────────────────
