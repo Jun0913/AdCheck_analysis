@@ -7,24 +7,19 @@ import os
 from urllib.parse import urlparse
 
 try:
-    import easyocr
-    _EASYOCR_AVAILABLE = True
+    from rapidocr_onnxruntime import RapidOCR
+    _RAPIDOCR_AVAILABLE = True
 except ImportError:
-    _EASYOCR_AVAILABLE = False
+    _RAPIDOCR_AVAILABLE = False
 
-_easyocr_reader = None
+_rapidocr_reader = None
 
 
-def _get_easyocr_reader() -> "easyocr.Reader":
-    global _easyocr_reader
-    if _easyocr_reader is None:
-        try:
-            import torch
-            use_gpu = torch.cuda.is_available()
-        except ImportError:
-            use_gpu = False
-        _easyocr_reader = easyocr.Reader(["ko", "en"], gpu=use_gpu)
-    return _easyocr_reader
+def _get_rapidocr_reader() -> "RapidOCR":
+    global _rapidocr_reader
+    if _rapidocr_reader is None:
+        _rapidocr_reader = RapidOCR()
+    return _rapidocr_reader
 
 
 try:
@@ -248,12 +243,12 @@ async def _extract_with_playwright(url: str) -> str:
 
 
 def extract_from_image(image_bytes: bytes) -> str:
-    """이미지에서 EasyOCR로 텍스트 추출 (한국어 + 영어)"""
-    if not _EASYOCR_AVAILABLE:
-        raise RuntimeError("EasyOCR가 설치되어 있지 않습니다. pip install easyocr 를 실행하세요.")
+    """이미지에서 RapidOCR로 텍스트 추출 (한국어 + 영어)"""
+    if not _RAPIDOCR_AVAILABLE:
+        raise RuntimeError("RapidOCR가 설치되어 있지 않습니다. pip install rapidocr-onnxruntime 를 실행하세요.")
     try:
-        reader = _get_easyocr_reader()
-        result = reader.readtext(image_bytes)
+        reader = _get_rapidocr_reader()
+        result, elapse = reader(image_bytes)
         if not result:
             return ""
         # 위→아래, 왼→오른쪽 순으로 정렬 (bbox 좌상단 기준)

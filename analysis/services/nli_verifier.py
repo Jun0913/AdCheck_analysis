@@ -150,10 +150,12 @@ def is_cosmetic_ad(text: str) -> bool:
             if entail > best_non_cosmetic_entail:
                 best_non_cosmetic_entail = entail
 
-        # 화장품 entail이 비화장품 entail보다 높고 최소 0.15 이상이면 화장품
-        is_cosmetic = best_cosmetic_entail > best_non_cosmetic_entail and best_cosmetic_entail >= 0.15
+        # 화장품 entail이 비화장품보다 0.15 이상 높고 최소 0.20 이상이면 화장품
+        # (마진 요구로 OCR 오인식 등 노이즈 방지)
+        margin = best_cosmetic_entail - best_non_cosmetic_entail
+        is_cosmetic = margin >= 0.15 and best_cosmetic_entail >= 0.20
         print(
-            f"[NLI] 도메인판별 최종 | 화장품={best_cosmetic_entail:.2f} 비화장품={best_non_cosmetic_entail:.2f} | "
+            f"[NLI] 도메인판별 최종 | 화장품={best_cosmetic_entail:.2f} 비화장품={best_non_cosmetic_entail:.2f} 마진={margin:.2f} | "
             f"{'✔ 화장품 → 분석 진행' if is_cosmetic else '✘ 화장품 아님 → 분석 중단'}"
         )
         return is_cosmetic
