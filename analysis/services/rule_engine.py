@@ -274,16 +274,6 @@ def analyze_sentence(sentence: str) -> SentenceResult:
                 score=0.0,
             )
 
-    # ── 도메인 관련성 필터 ─────────────────────────────────
-    if not is_cosmetic_related(sentence):
-        return SentenceResult(
-            sentence=sentence,
-            suspicion_level=SuspicionLevel.NORMAL,
-            matched_keywords=[],
-            matched_patterns=[],
-            reason="화장품·뷰티 광고와 관련 없는 문구입니다.",
-            score=0.0,
-        )
 
     matched_keywords: list[str] = []
     matched_patterns: list[str] = []

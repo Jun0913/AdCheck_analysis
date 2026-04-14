@@ -1,9 +1,10 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from pydantic import BaseModel
-from analysis.models.schemas import AnalyzeRequest, AnalyzeResponse, InputType
+from analysis.models.schemas import AnalyzeRequest, AnalyzeResponse, InputType, SuspicionLevel
 from analysis.services.extractor import extract_from_url, extract_from_image, split_sentences
 from analysis.services.rule_engine import analyze_sentence, calculate_overall_score
 from analysis.services.ai_analyzer import analyze_with_kobert, generate_summary
+from analysis.services.nli_verifier import is_cosmetic_ad
 import os
 import base64
 
@@ -52,13 +53,34 @@ async def _run_analysis(text: str) -> AnalyzeResponse:
     sentences = split_sentences(text)
 
     if not sentences:
-        from analysis.models.schemas import SuspicionLevel
         return AnalyzeResponse(
             original_text=text,
             overall_suspicion_level=SuspicionLevel.NORMAL,
             overall_score=0.0,
             sentence_results=[],
             summary="분석할 문장이 충분하지 않습니다.",
+        )
+
+    # 0차: 화장품·뷰티 광고 도메인 판별 (전체 텍스트에 1번만 실행)
+    if not is_cosmetic_ad(text[:512]):  # 앞 512자만 사용해 속도 최적화
+        from analysis.models.schemas import SentenceResult
+        not_cosmetic_results = [
+            SentenceResult(
+                sentence=s,
+                suspicion_level=SuspicionLevel.NORMAL,
+                matched_keywords=[],
+                matched_patterns=[],
+                reason="화장품·뷰티 광고와 관련 없는 문구로 판단되어 분석 대상에서 제외되었습니다.",
+                score=0.0,
+            )
+            for s in sentences
+        ]
+        return AnalyzeResponse(
+            original_text=text,
+            overall_suspicion_level=SuspicionLevel.NORMAL,
+            overall_score=0.0,
+            sentence_results=not_cosmetic_results,
+            summary="화장품·뷰티 광고가 아닌 것으로 판단됩니다. 본 서비스는 화장품 광고의 허위·과장 표현을 분석합니다.",
         )
 
     # 1차 규칙기반 분석

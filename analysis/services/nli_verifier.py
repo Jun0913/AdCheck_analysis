@@ -103,6 +103,65 @@ _LEVEL_ORDER = {
 }
 
 
+# ── 화장품 도메인 판별 (Zero-shot) ───────────────────────────
+# contradiction이 높으면 화장품 광고가 아닌 것으로 판단 (더 안정적)
+COSMETIC_HYPOTHESES = [
+    "이 글은 화장품 또는 뷰티 제품에 관한 내용이다",
+    "이 글은 피부, 모발, 또는 미용 관련 제품을 다루고 있다",
+    "이 글은 스킨케어, 메이크업, 또는 헤어케어 제품을 소개한다",
+    "이 글은 크림, 세럼, 로션, 앰플 등 화장품을 광고한다",
+    "이 글은 피부 보습, 미백, 주름 개선 등 뷰티 효과를 설명한다",
+]
+NON_COSMETIC_HYPOTHESES = [
+    "이 글은 전자제품, 가전제품, 또는 식품에 관한 내용이다",
+    "이 글은 화장품과 무관한 제품이나 서비스를 다루고 있다",
+    "이 글은 음식, 식재료, 또는 요리에 관한 내용이다",
+    "이 글은 의류, 신발, 또는 패션 잡화에 관한 내용이다",
+    "이 글은 가구, 생활용품, 또는 인테리어에 관한 내용이다",
+    "이 글은 의약품, 건강기능식품, 또는 의료기기에 관한 내용이다",
+]
+COSMETIC_CONTRADICTION_THRESHOLD = 0.45
+
+
+def is_cosmetic_ad(text: str) -> bool:
+    """Zero-shot NLI로 화장품·뷰티 광고 여부 판별.
+    모든 가설에 대해 contradiction이 높으면 화장품 아님으로 판단."""
+    if not _load_nli_model():
+        return True  # 모델 로드 실패 시 분석 계속 진행
+    try:
+        preview = text[:30].replace("\n", " ")
+        # 화장품 가설 최대 entailment
+        best_cosmetic_entail = 0.0
+        for i, hypothesis in enumerate(COSMETIC_HYPOTHESES):
+            entail, contra = _get_nli_probs(text, hypothesis)
+            print(
+                f"[NLI] 화장품가설{i+1} | entail={entail:.2f} contra={contra:.2f} | \"{preview}\""
+            )
+            if entail > best_cosmetic_entail:
+                best_cosmetic_entail = entail
+
+        # 비화장품 가설 최대 entailment
+        best_non_cosmetic_entail = 0.0
+        for i, hypothesis in enumerate(NON_COSMETIC_HYPOTHESES):
+            entail, contra = _get_nli_probs(text, hypothesis)
+            print(
+                f"[NLI] 비화장품가설{i+1} | entail={entail:.2f} contra={contra:.2f} | \"{preview}\""
+            )
+            if entail > best_non_cosmetic_entail:
+                best_non_cosmetic_entail = entail
+
+        # 화장품 entail이 비화장품 entail보다 높고 최소 0.15 이상이면 화장품
+        is_cosmetic = best_cosmetic_entail > best_non_cosmetic_entail and best_cosmetic_entail >= 0.15
+        print(
+            f"[NLI] 도메인판별 최종 | 화장품={best_cosmetic_entail:.2f} 비화장품={best_non_cosmetic_entail:.2f} | "
+            f"{'✔ 화장품 → 분석 진행' if is_cosmetic else '✘ 화장품 아님 → 분석 중단'}"
+        )
+        return is_cosmetic
+    except Exception as e:
+        print(f"[NLI] 도메인 판별 오류: {e}")
+        return True
+
+
 def _get_nli_probs(premise: str, hypothesis: str) -> tuple[float, float]:
     """(entailment 확률, contradiction 확률) 반환"""
     inputs = _nli_tokenizer(
