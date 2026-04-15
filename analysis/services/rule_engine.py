@@ -2,22 +2,19 @@ import re
 from analysis.models.schemas import SuspicionLevel, SentenceResult
 
 # ────────────────────────────────────────────
-# 화이트리스트 (허용 표현)
-# 출처: 정제 시트 기준 라벨=1 (허용문구)
-# 이 표현이 포함된 문장은 규칙기반 의심 탐지에서 제외
+# 허용 표현
+# - STRICT_ALLOW_KEYWORDS: 문장 전체가 허용 맥락일 때 정상 처리에 사용
+# - CONTEXT_ALLOW_KEYWORDS: 정상 보조 근거로만 사용
+# - DOMAIN_ONLY_TERMS: 화이트리스트가 아니라 도메인 단서로만 사용
 # ────────────────────────────────────────────
 
-WHITELIST_KEYWORDS: list[str] = [
+STRICT_ALLOW_KEYWORDS: list[str] = [
     # 식약처 허가 기능성 표현
     "식약처 허가 기능성 화장품",
     "기능성 화장품 심사",
     "기능성 화장품 (미백에 도움)",
     "기능성 화장품 (주름 개선에 도움)",
     "기능성 화장품 (자외선 차단)",
-    # 피부과 테스트
-    "피부과 테스트 완료",
-    "피부과 임상 테스트 완료",
-    "피부과 테스트 마친",
     # 허용 효능 표현 (도움을 주는 수준)
     "피부 보습에 도움",
     "피부 진정에 도움",
@@ -45,19 +42,45 @@ WHITELIST_KEYWORDS: list[str] = [
     "COSMOS 인증",
     "시험검사기관",
     "ISO 인증",
-    # 기타 허용 표현
-    "가려준다",
-    "탄력/리프팅 개선",
     "건조한 피부를 촉촉하게",
     "건조함 등으로 인한 트러블",
     "피부장벽 강화에 도움",
     "피부 수분 유지에 도움",
-    # 일반 제품명/카테고리 표현 (KoBERT 과탐지 방지)
+]
+
+CONTEXT_ALLOW_KEYWORDS: list[str] = [
+    # 피부과 테스트
+    "피부과 테스트 완료",
+    "피부과 임상 테스트 완료",
+    "피부과 테스트 마친",
+    # 문맥에 따라 허용/과장 가능성이 갈릴 수 있는 표현
+    "가려준다",
+    "탄력/리프팅 개선",
+    # 일반 UI/크롤링 노이즈
+    "공유하기", "URL복사", "신고하기", "본문 바로가기",
+    "카테고리 이동", "이웃추가", "MY메뉴",
+]
+
+DOMAIN_ONLY_TERMS: list[str] = [
     "보습로션", "아기로션", "아기크림", "아기보습",
     "로션", "크림", "세럼", "앰플", "에센스", "토너",
     "선크림", "선스크린", "클렌저", "폼클렌징",
-    "공유하기", "URL복사", "신고하기", "본문 바로가기",
-    "카테고리 이동", "이웃추가", "MY메뉴",
+]
+
+ALLOW_CONTEXT_STOPWORDS: set[str] = {
+    "이", "가", "은", "는", "을", "를", "에", "의", "과", "와", "도", "로", "으로",
+    "및", "또는", "한", "수", "더", "등", "제품", "사용", "사용감", "기능", "완료",
+    "마친", "도움", "주는", "주는", "주며", "좋은", "좋습니다", "입니다", "있습니다",
+    "피부과", "테스트",
+}
+
+# 화장품 여부와 무관하게 강하게 차단할 표현 (도메인 필터 우회)
+STRONG_FORBIDDEN_KEYWORDS: list[str] = [
+    "100%", "100퍼", "100퍼센트", "100프로",
+    "영구", "영구제거", "평생 보장", "완치", "완벽", "즉시 효과",
+    "의사 보증", "의사추천", "의사 인증",
+    "부작용 없음", "전혀 부작용", "무조건 환불",
+    "평생 유지", "확실한 효과",
 ]
 
 # ────────────────────────────────────────────
@@ -191,6 +214,22 @@ FORBIDDEN_KEYWORDS: dict[str, list[str]] = {
     ],
 }
 
+FORBIDDEN_REGEX_PATTERNS: dict[str, list[tuple[str, str]]] = {
+    "추천보증": [
+        (r"(의사|피부과|전문의|약사|한의사)[가-힣]*\s*추천", "전문가 추천"),
+        (r"(의사|병원|피부과|전문의)[가-힣]*\s*인증", "전문가 인증"),
+        (r"(의사|병원|피부과|전문의)[가-힣]*\s*처방", "전문가 처방"),
+    ],
+    "효능과장": [
+        (r"반드시\s*[가-힣]+\w*", "반드시"),
+        (r"(주름|기미|잡티|흉터)[가-힣]*\s*(완전히\s*)?(사라지|없어지)", "사라지다"),
+    ],
+    "기능성오인": [
+        (r"(주름|기미|잡티|모공)[가-힣]*\s*(제거|없애|없앰|완전 제거)", "제거"),
+        (r"(피부|세포|모발|두피)[가-힣]*\s*재생", "재생"),
+    ],
+}
+
 # ────────────────────────────────────────────
 # 주의 키워드 (과장 가능성 있으나 단정 어려운 표현)
 # ────────────────────────────────────────────
@@ -232,9 +271,56 @@ def is_cosmetic_related(sentence: str) -> bool:
     return any(noun in sentence for noun in COSMETIC_DOMAIN_NOUNS)
 
 
+def _find_forbidden_patterns(sentence: str) -> tuple[list[str], list[str]]:
+    matched_keywords: list[str] = []
+    matched_patterns: list[str] = []
+
+    for pattern_tag, keywords in FORBIDDEN_KEYWORDS.items():
+        for kw in keywords:
+            if kw in sentence:
+                matched_keywords.append(kw)
+                if pattern_tag not in matched_patterns:
+                    matched_patterns.append(pattern_tag)
+
+    for pattern_tag, regex_items in FORBIDDEN_REGEX_PATTERNS.items():
+        for pattern, label in regex_items:
+            if re.search(pattern, sentence):
+                matched_keywords.append(label)
+                if pattern_tag not in matched_patterns:
+                    matched_patterns.append(pattern_tag)
+
+    return matched_keywords, matched_patterns
+
+
+def _find_whitelist_matches(sentence: str) -> list[str]:
+    return [kw for kw in STRICT_ALLOW_KEYWORDS if kw in sentence]
+
+
+def _find_context_allow_matches(sentence: str) -> list[str]:
+    return [kw for kw in CONTEXT_ALLOW_KEYWORDS if kw in sentence]
+
+
+def _is_clearly_allowed_sentence(sentence: str, whitelist_matches: list[str]) -> bool:
+    """
+    허용 표현이 문장 일부에 섞인 경우까지 정상 처리하지 않도록,
+    화이트리스트 구문을 제거한 뒤 남는 의미 토큰이 거의 없는 경우만 허용한다.
+    """
+    residual = sentence
+    for kw in sorted(whitelist_matches, key=len, reverse=True):
+        residual = residual.replace(kw, " ")
+
+    tokens = re.findall(r"[가-힣A-Za-z0-9%+/]+", residual)
+    meaningful_tokens = [
+        token for token in tokens
+        if len(token) >= 2 and token not in ALLOW_CONTEXT_STOPWORDS
+    ]
+    return len(meaningful_tokens) <= 1
+
+
 CAUTION_KEYWORDS: list[str] = [
     "\u0032\u0034\uC2DC\uAC04", "\uC9C0\uC18D", "\uC9C0\uC18D\uB825", "\uC720\uC9C0",
     "\uB860\uB798\uC2A4\uD305", "\uB860\uC6E8\uC5B4", "long lasting", "long-lasting",
+    "해결",
 ]
 
 
@@ -252,6 +338,7 @@ _PATTERN_DESC: dict[str, str] = {
     "추천보증":   "전문가 추천·인증을 주장하는 표현",
     "비교우위":   "근거 없이 타사 대비 우위를 주장하는 표현",
     "첨단기술오인": "첨단 기술·세포 재생을 근거 없이 강조하는 표현",
+    "강력금지":   "100%, 영구, 완치 등 과도한 보장/단정 표현",
 }
 
 
@@ -259,23 +346,25 @@ _PATTERN_DESC: dict[str, str] = {
 # 분석 함수
 # ────────────────────────────────────────────
 
-def analyze_sentence(sentence: str) -> SentenceResult:
+def analyze_sentence(sentence: str, *, force_cosmetic: bool = False) -> SentenceResult:
     """1차 규칙기반 엔진: 문장 하나를 분석하여 SentenceResult 반환"""
+    normalized_sentence = re.sub(r"100\s*프로", "100프로", sentence)
+    normalized_sentence = re.sub(r"100\s*퍼(?:센트)?", "100퍼센트", normalized_sentence)
 
-    # ── 화이트리스트 체크 ───────────────────────────────────
-    for wl_kw in WHITELIST_KEYWORDS:
-        if wl_kw in sentence:
+    # 0) 화장품 여부와 무관한 강력 금지 표현 우선 차단
+    for kw in STRONG_FORBIDDEN_KEYWORDS:
+        if kw in normalized_sentence:
             return SentenceResult(
                 sentence=sentence,
-                suspicion_level=SuspicionLevel.NORMAL,
-                matched_keywords=[],
-                matched_patterns=[],
-                reason="허용된 표현이 포함되어 있습니다.",
-                score=0.0,
+                suspicion_level=SuspicionLevel.SUSPICIOUS,
+                matched_keywords=[kw],
+                matched_patterns=["강력금지"],
+                reason=f"'{kw}'처럼 허위/과장 소지가 큰 표현을 포함합니다.",
+                score=0.85,
             )
 
     # ── 도메인 관련성 필터 ─────────────────────────────────
-    if not is_cosmetic_related(sentence):
+    if not force_cosmetic and not is_cosmetic_related(normalized_sentence):
         return SentenceResult(
             sentence=sentence,
             suspicion_level=SuspicionLevel.NORMAL,
@@ -285,20 +374,35 @@ def analyze_sentence(sentence: str) -> SentenceResult:
             score=0.0,
         )
 
-    matched_keywords: list[str] = []
-    matched_patterns: list[str] = []
-
-    # 금지 키워드 검사
-    for pattern_tag, keywords in FORBIDDEN_KEYWORDS.items():
-        for kw in keywords:
-            if kw in sentence:
-                matched_keywords.append(kw)
-                if pattern_tag not in matched_patterns:
-                    matched_patterns.append(pattern_tag)
+    matched_keywords, matched_patterns = _find_forbidden_patterns(normalized_sentence)
 
     # 주의 키워드 검사
-    caution_matches = [kw for kw in CAUTION_KEYWORDS if kw in sentence]
+    caution_matches = [kw for kw in CAUTION_KEYWORDS if kw in normalized_sentence]
     matched_keywords.extend(caution_matches)
+
+    # ── 화이트리스트 체크 ───────────────────────────────────
+    # 금지 패턴이 없고, 문장 전체가 허용 맥락일 때만 정상 처리한다.
+    whitelist_matches = _find_whitelist_matches(normalized_sentence)
+    context_allow_matches = _find_context_allow_matches(normalized_sentence)
+    if whitelist_matches and not matched_patterns and _is_clearly_allowed_sentence(normalized_sentence, whitelist_matches):
+        return SentenceResult(
+            sentence=sentence,
+            suspicion_level=SuspicionLevel.NORMAL,
+            matched_keywords=[],
+            matched_patterns=[],
+            reason="허용된 표현 중심의 문구로 판단됩니다.",
+            score=0.0,
+        )
+
+    if context_allow_matches and not matched_patterns and not caution_matches:
+        return SentenceResult(
+            sentence=sentence,
+            suspicion_level=SuspicionLevel.NORMAL,
+            matched_keywords=[],
+            matched_patterns=[],
+            reason="허용 또는 안내 성격의 표현이 포함된 문구로 판단됩니다.",
+            score=0.0,
+        )
 
     # 의심도 결정 + 규칙 기반 연속 점수
     if matched_patterns:
