@@ -1,10 +1,9 @@
 import httpx
 from bs4 import BeautifulSoup
-from PIL import Image
-import io
 import re
-import os
 from urllib.parse import urlparse
+import numpy as np
+import cv2
 
 try:
     import easyocr
@@ -12,19 +11,250 @@ try:
 except ImportError:
     _EASYOCR_AVAILABLE = False
 
-_easyocr_reader = None
+_easy_reader = None
+OCR_PRIMARY_MIN_SCORE = 0.45
+OCR_PRIMARY_MIN_TEXT_LEN = 12
+OCR_CORRECTIONS = {
+    "피부릍": "피부를",
+    "주릅": "주름",
+    "효과보장입나다": "효과 보장입니다",
+    "효과보장": "효과 보장",
+    "아토피를료": "아토피 치료",
+    "논코메도제나": "논코메도제닉",
+    "논코메도제닉야": "논코메도제닉",
+    "안티에이징 ": "안티에이징 ",
+    "피부치밀도도": "피부치밀도",
+    "인체적용시힘 완료": "인체적용시험 완료",
+    "인체적용시험 완로": "인체적용시험 완료",
+}
 
 
-def _get_easyocr_reader() -> "easyocr.Reader":
-    global _easyocr_reader
-    if _easyocr_reader is None:
+def _get_easy_reader():
+    global _easy_reader
+    if _easy_reader is None:
         try:
             import torch
             use_gpu = torch.cuda.is_available()
-        except ImportError:
+        except Exception:
             use_gpu = False
-        _easyocr_reader = easyocr.Reader(["ko", "en"], gpu=use_gpu)
-    return _easyocr_reader
+        _easy_reader = easyocr.Reader(["ko", "en"], gpu=use_gpu)
+    return _easy_reader
+
+
+def _normalize_ocr_text(text: str) -> str:
+    cleaned = text.replace("\r", "\n")
+    cleaned = re.sub(r"[|¦]+", " ", cleaned)
+    cleaned = re.sub(r"[`´‘’“”]+", "", cleaned)
+    cleaned = cleaned.replace(" / ", "/")
+    cleaned = cleaned.replace(" mm", "mm")
+    cleaned = re.sub(r"(?<=\d)\.\s+(?=\d)", ".", cleaned)
+    cleaned = re.sub(r"([가-힣A-Za-z0-9])([,.:;!?])", r"\1\2 ", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    for src, dst in OCR_CORRECTIONS.items():
+        cleaned = cleaned.replace(src, dst)
+    cleaned = re.sub(r"(?<=\d)\s*/\s*(?=\d)", "/", cleaned)
+    cleaned = re.sub(r"(?<=\d)\s*mm", "mm", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"0\.\s*5mm/15mm", "0.5mm/1.5mm", cleaned)
+    cleaned = re.sub(r"0\.5mm/15mm", "0.5mm/1.5mm", cleaned)
+    cleaned = re.sub(r"0\.5mm/1Smm", "0.5mm/1.5mm", cleaned)
+    cleaned = re.sub(r"인체 적용 시험 완료", "인체적용시험 완료", cleaned)
+    lines = [line.strip() for line in cleaned.split("\n") if len(line.strip()) > 1]
+    return "\n".join(lines).strip()
+
+
+def _ocr_quality_score(text: str, confidences: list[float]) -> float:
+    if not text:
+        return 0.0
+    avg_conf = sum(confidences) / max(len(confidences), 1)
+    text_len = len(text)
+    korean_chars = sum("가" <= ch <= "힣" for ch in text)
+    alpha_num = sum(ch.isalnum() for ch in text)
+    special_chars = text_len - alpha_num - text.count(" ")
+    korean_ratio = korean_chars / max(text_len, 1)
+    alpha_ratio = alpha_num / max(text_len, 1)
+    special_penalty = min(special_chars / max(text_len, 1), 0.35)
+    length_bonus = min(text_len / 80.0, 1.0) * 0.15
+    return round(
+        (avg_conf * 0.55) + (korean_ratio * 0.15) + (alpha_ratio * 0.15) + length_bonus - special_penalty,
+        4,
+    )
+
+
+def _decode_image(image_bytes: bytes):
+    arr = np.frombuffer(image_bytes, np.uint8)
+    return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+
+def _encode_png(image) -> bytes:
+    ok, buf = cv2.imencode(".png", image)
+    return buf.tobytes() if ok else b""
+
+
+def _extract_text_rows(image_bytes: bytes) -> list[bytes]:
+    """
+    체크리스트/배너형 이미지에서 텍스트 줄 단위로 분리한다.
+    """
+    rows: list[bytes] = []
+    try:
+        img = _decode_image(image_bytes)
+        if img is None:
+            return rows
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if min(gray.shape[:2]) < 800:
+            scale = min(2.2, 800 / max(1, min(gray.shape[:2])))
+            gray = cv2.resize(
+                gray,
+                (int(gray.shape[1] * scale), int(gray.shape[0] * scale)),
+                interpolation=cv2.INTER_CUBIC,
+            )
+
+        binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+        projection = np.sum(binary > 0, axis=1)
+        min_pixels = max(20, int(binary.shape[1] * 0.03))
+
+        bands: list[tuple[int, int]] = []
+        in_band = False
+        start = 0
+        for idx, value in enumerate(projection):
+            if value >= min_pixels and not in_band:
+                start = idx
+                in_band = True
+            elif value < min_pixels and in_band:
+                end = idx
+                if end - start >= 18:
+                    bands.append((start, end))
+                in_band = False
+        if in_band:
+            end = len(projection) - 1
+            if end - start >= 18:
+                bands.append((start, end))
+
+        merged: list[tuple[int, int]] = []
+        for start, end in bands:
+            if not merged or start - merged[-1][1] > 18:
+                merged.append((start, end))
+            else:
+                merged[-1] = (merged[-1][0], end)
+
+        for start, end in merged:
+            pad = 10
+            top = max(start - pad, 0)
+            bottom = min(end + pad, gray.shape[0])
+            crop = gray[top:bottom, :]
+            row_binary = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            encoded = _encode_png(row_binary)
+            if encoded:
+                rows.append(encoded)
+    except Exception:
+        return rows
+
+    return rows
+
+
+def _build_ocr_variants(image_bytes: bytes) -> list[tuple[str, bytes]]:
+    """
+    원본 + 여러 전처리 버전을 만들어 OCR 성공률을 높인다.
+    """
+    variants: list[tuple[str, bytes]] = [("original", image_bytes)]
+    try:
+        img = _decode_image(image_bytes)
+        if img is None:
+            return variants
+
+        h, w = img.shape[:2]
+        min_side = min(h, w)
+        scale = 1.0
+        if min_side < 800:
+            scale = min(2.5, 800 / max(1, min_side))
+            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        contrast = clahe.apply(gray)
+        variants.append(("grayscale_clahe", _encode_png(contrast)))
+
+        blurred = cv2.bilateralFilter(contrast, d=7, sigmaColor=75, sigmaSpace=75)
+        adaptive = cv2.adaptiveThreshold(
+            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 9
+        )
+        variants.append(("adaptive_threshold", _encode_png(adaptive)))
+
+        sharpen_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+        sharpened = cv2.filter2D(contrast, -1, sharpen_kernel)
+        variants.append(("sharpened", _encode_png(sharpened)))
+
+        otsu = cv2.threshold(contrast, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+        variants.append(("otsu_threshold", _encode_png(otsu)))
+    except Exception:
+        return variants
+
+    return [(name, data) for name, data in variants if data]
+
+
+def _run_easyocr_once(image_bytes: bytes, *, text_threshold: float, low_text: float, link_threshold: float) -> dict:
+    reader = _get_easy_reader()
+    result = reader.readtext(
+        image_bytes,
+        detail=1,
+        paragraph=False,
+        text_threshold=text_threshold,
+        low_text=low_text,
+        link_threshold=link_threshold,
+        mag_ratio=1.5,
+    )
+    if not result:
+        return {"text": "", "score": 0.0, "confidences": [], "raw_count": 0}
+
+    result.sort(key=lambda x: (x[0][0][1], x[0][0][0]))
+    lines = [item[1] for item in result if item[2] > 0.35]
+    confidences = [float(item[2]) for item in result if item[2] > 0.35]
+    text = _normalize_ocr_text("\n".join(lines))
+    return {
+        "text": text,
+        "score": _ocr_quality_score(text, confidences),
+        "confidences": confidences,
+        "raw_count": len(result),
+    }
+
+
+def _extract_with_easyocr_variants(image_bytes: bytes) -> str:
+    variants = _build_ocr_variants(image_bytes)
+    best = {"text": "", "score": 0.0}
+
+    primary_settings = {"text_threshold": 0.4, "low_text": 0.3, "link_threshold": 0.3}
+    for name, variant_bytes in variants:
+        candidate = _run_easyocr_once(variant_bytes, **primary_settings)
+        if candidate["score"] > best["score"]:
+            best = {**candidate, "variant": name}
+
+    row_texts = []
+    row_scores = []
+    for row_bytes in _extract_text_rows(image_bytes):
+        candidate = _run_easyocr_once(row_bytes, **primary_settings)
+        if candidate["text"]:
+            row_texts.append(candidate["text"])
+            row_scores.append(candidate["score"])
+    if row_texts:
+        row_joined = _normalize_ocr_text("\n".join(row_texts))
+        row_score = (sum(row_scores) / max(len(row_scores), 1)) + min(len(row_texts) / 20.0, 0.2)
+        if row_score > best["score"] and len(row_joined) >= len(best["text"]) * 0.7:
+            best = {"text": row_joined, "score": round(row_score, 4), "variant": "row_crops"}
+
+    if best["score"] >= OCR_PRIMARY_MIN_SCORE and len(best["text"]) >= OCR_PRIMARY_MIN_TEXT_LEN:
+        return best["text"]
+
+    # Fallback: relax thresholds and retry on the top variants.
+    fallback_settings = {"text_threshold": 0.25, "low_text": 0.15, "link_threshold": 0.2}
+    for name, variant_bytes in variants[:3]:
+        candidate = _run_easyocr_once(variant_bytes, **fallback_settings)
+        if candidate["score"] > best["score"]:
+            best = {**candidate, "variant": name}
+
+    return best["text"]
+
 
 
 try:
@@ -248,18 +478,16 @@ async def _extract_with_playwright(url: str) -> str:
 
 
 def extract_from_image(image_bytes: bytes) -> str:
-    """이미지에서 EasyOCR로 텍스트 추출 (한국어 + 영어)"""
+    """
+    이미지에서 텍스트 추출.
+    - 여러 전처리 버전을 만든 뒤 EasyOCR로 점수화
+    - 1차 결과 품질이 낮으면 완화된 threshold로 fallback 재시도
+    - 결과는 간단한 OCR 오타 교정을 거쳐 반환
+    """
     if not _EASYOCR_AVAILABLE:
         raise RuntimeError("EasyOCR가 설치되어 있지 않습니다. pip install easyocr 를 실행하세요.")
     try:
-        reader = _get_easyocr_reader()
-        result = reader.readtext(image_bytes)
-        if not result:
-            return ""
-        # 위→아래, 왼→오른쪽 순으로 정렬 (bbox 좌상단 기준)
-        result.sort(key=lambda x: (x[0][0][1], x[0][0][0]))
-        lines = [item[1] for item in result if item[2] > 0.3]
-        return "\n".join(lines).strip()
+        return _extract_with_easyocr_variants(image_bytes)
     except Exception as e:
         raise RuntimeError(f"이미지 텍스트 추출 실패: {e}")
 
