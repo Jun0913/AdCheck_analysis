@@ -2,6 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from analysis.routers import analyze
+from analysis.services.ai_analyzer import _load_model as load_kobert_model
+from analysis.services.nli_verifier import _load_nli_model
 
 load_dotenv()
 
@@ -23,6 +25,26 @@ app.add_middleware(
 app.include_router(analyze.router)
 
 
+@app.on_event("startup")
+def warmup_models():
+    use_kobert = analyze.USE_KOBERT
+    kobert_ready = load_kobert_model() if use_kobert else False
+    print(f"[startup] USE_KOBERT={use_kobert} KoBERT_READY={kobert_ready}")
+
+    # NLI is conditional, but validating it at startup makes stage failures visible.
+    nli_ready = _load_nli_model()
+    print(f"[startup] NLI_READY={nli_ready}")
+
+
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "딱 걸렸어! 분석 서버"}
+    use_kobert = analyze.USE_KOBERT
+    kobert_ready = load_kobert_model() if use_kobert else False
+    nli_ready = _load_nli_model()
+    return {
+        "status": "ok",
+        "service": "딱 걸렸어! 분석 서버",
+        "use_kobert": use_kobert,
+        "kobert_ready": kobert_ready,
+        "nli_ready": nli_ready,
+    }

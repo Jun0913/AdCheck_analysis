@@ -17,12 +17,25 @@
   - 라벨 순서: 0=entailment, 1=neutral, 2=contradiction
 """
 
+import json
 import os
+from pathlib import Path
+from analysis.services.model_runtime import prepare_model_runtime
+
+prepare_model_runtime()
+
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from analysis.models.schemas import SentenceResult, SuspicionLevel
 
-NLI_MODEL_NAME = os.getenv("NLI_MODEL_PATH", "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli")
+DEFAULT_HYPOTHESES_PATH = Path(__file__).resolve().parent.parent / "config" / "nli_hypotheses.json"
+NLI_HYPOTHESES_PATH = Path(os.getenv("NLI_HYPOTHESES_PATH", str(DEFAULT_HYPOTHESES_PATH)))
+CACHE_MODEL_DIR = (
+    Path(".cache")
+    / "huggingface"
+    / "transformers"
+    / "models--MoritzLaurer--mDeBERTa-v3-base-mnli-xnli"
+)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 ENTAILMENT_IDX    = 0
@@ -33,15 +46,40 @@ NLI_DENY_THRESHOLD    = 0.50  # contradiction >= 이 값이면 위반 부정
 
 _nli_tokenizer = None
 _nli_model     = None
+_hypotheses_config = None
+
+
+_LEVEL_NAME_MAP = {
+    "NORMAL": SuspicionLevel.NORMAL,
+    "CAUTION": SuspicionLevel.CAUTION,
+    "SUSPICIOUS": SuspicionLevel.SUSPICIOUS,
+}
+
+
+def _resolve_default_nli_model_path() -> str:
+    snapshots_dir = CACHE_MODEL_DIR / "snapshots"
+    if snapshots_dir.exists():
+        snapshots = sorted(p for p in snapshots_dir.iterdir() if p.is_dir())
+        if snapshots:
+            return str(snapshots[-1])
+    return "MoritzLaurer/mDeBERTa-v3-base-mnli-xnli"
+
+
+NLI_MODEL_NAME = os.getenv("NLI_MODEL_PATH", _resolve_default_nli_model_path())
 
 
 def _load_nli_model() -> bool:
     global _nli_tokenizer, _nli_model
     if _nli_model is not None:
         return True
+    prepare_model_runtime()
     try:
-        _nli_tokenizer = AutoTokenizer.from_pretrained(NLI_MODEL_NAME)
-        _nli_model = AutoModelForSequenceClassification.from_pretrained(NLI_MODEL_NAME).to(DEVICE)
+        local_only = os.path.exists(NLI_MODEL_NAME)
+        _nli_tokenizer = AutoTokenizer.from_pretrained(NLI_MODEL_NAME, local_files_only=local_only)
+        _nli_model = AutoModelForSequenceClassification.from_pretrained(
+            NLI_MODEL_NAME,
+            local_files_only=local_only,
+        ).to(DEVICE)
         _nli_model.eval()
         print(f"[NLI] 모델 로드 완료: {NLI_MODEL_NAME}")
         return True
@@ -50,51 +88,44 @@ def _load_nli_model() -> bool:
         return False
 
 
-# ── 위반 가설 목록 ────────────────────────────────────────────
-# 규칙 엔진 패턴 태그 → [(가설 텍스트, 위반 시 부여 레벨)]
-# 패턴 태그별로 분리해서 관련 가설만 선택적으로 검증
+def _load_hypotheses_config() -> dict[str, list[dict]]:
+    global _hypotheses_config
+    if _hypotheses_config is not None:
+        return _hypotheses_config
 
-VIOLATION_HYPOTHESES: dict[str, list[tuple[str, SuspicionLevel]]] = {
+    if not NLI_HYPOTHESES_PATH.exists():
+        print(f"[NLI] 가설 설정 파일 없음: {NLI_HYPOTHESES_PATH}")
+        _hypotheses_config = {}
+        return _hypotheses_config
 
-    "의약품오인": [
-        ("이 문장은 화장품이 질병을 치료하거나 예방한다고 주장한다",              SuspicionLevel.SUSPICIOUS),
-        ("이 문장은 화장품을 의약품처럼 의학적 효능이 있다고 표현한다",            SuspicionLevel.SUSPICIOUS),
-        ("이 문장은 피부 염증·감염·알레르기를 치료할 수 있다고 주장한다",          SuspicionLevel.SUSPICIOUS),
-    ],
+    try:
+        with NLI_HYPOTHESES_PATH.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as e:
+        print(f"[NLI] 가설 설정 파일 로드 실패: {e}")
+        _hypotheses_config = {}
+        return _hypotheses_config
 
-    "효능과장": [
-        ("이 문장은 화장품 효과를 100% 확실하게 보장한다고 주장한다",             SuspicionLevel.SUSPICIOUS),
-        ("이 문장은 짧은 기간 안에 눈에 띄는 효과가 반드시 난다고 단정한다",       SuspicionLevel.SUSPICIOUS),
-        ("이 문장은 화장품이 완벽하거나 절대적인 효과를 낸다고 주장한다",          SuspicionLevel.SUSPICIOUS),
-    ],
+    normalized: dict[str, list[dict]] = {}
+    for pattern, items in raw.items():
+        valid_items = []
+        for item in items:
+            level_name = str(item.get("level", "CAUTION")).upper()
+            hypothesis = str(item.get("hypothesis", "")).strip()
+            if not hypothesis or level_name not in _LEVEL_NAME_MAP:
+                continue
+            valid_items.append(
+                {
+                    "hypothesis": hypothesis,
+                    "level": _LEVEL_NAME_MAP[level_name],
+                    "weight": float(item.get("weight", 1.0)),
+                    "enabled": bool(item.get("enabled", True)),
+                }
+            )
+        normalized[pattern] = valid_items
 
-    "기능성오인": [
-        ("이 문장은 허가 없이 주름 개선·미백·자외선 차단 기능을 주장한다",         SuspicionLevel.CAUTION),
-        ("이 문장은 피부 세포나 모발을 재생시킬 수 있다고 주장한다",               SuspicionLevel.CAUTION),
-        ("이 문장은 체중 감소나 체형 변화 효과가 있다고 주장한다",                 SuspicionLevel.CAUTION),
-    ],
-
-    "안전성단정": [
-        ("이 문장은 이 제품에 부작용이 전혀 없다고 단정한다",                      SuspicionLevel.SUSPICIOUS),
-        ("이 문장은 모든 사람의 피부에 완전히 안전하다고 주장한다",                 SuspicionLevel.SUSPICIOUS),
-        ("이 문장은 자극이나 알레르기 반응이 절대 없다고 보장한다",                 SuspicionLevel.SUSPICIOUS),
-    ],
-
-    "추천보증": [
-        ("이 문장은 의사나 의료 전문가가 이 제품을 추천하거나 인증했다고 주장한다", SuspicionLevel.SUSPICIOUS),
-        ("이 문장은 공인 기관의 인증이나 허가를 받았다고 주장한다",                SuspicionLevel.SUSPICIOUS),
-    ],
-
-    "비교우위": [
-        ("이 문장은 다른 제품보다 이 제품이 더 우수하다고 주장한다",               SuspicionLevel.CAUTION),
-        ("이 문장은 이 제품이 업계에서 유일하거나 최고라고 주장한다",               SuspicionLevel.CAUTION),
-    ],
-
-    "첨단기술오인": [
-        ("이 문장은 줄기세포·엑소좀 등 첨단 기술로 피부를 재생한다고 주장한다",    SuspicionLevel.CAUTION),
-        ("이 문장은 과학적으로 검증되지 않은 피부 재생 기술 효과를 주장한다",      SuspicionLevel.CAUTION),
-    ],
-}
+    _hypotheses_config = normalized
+    return _hypotheses_config
 
 _LEVEL_ORDER = {
     SuspicionLevel.NORMAL:     0,
@@ -121,11 +152,14 @@ def _get_nli_probs(premise: str, hypothesis: str) -> tuple[float, float]:
 
 def _select_hypotheses(
     rule_patterns: list[str],
-) -> list[tuple[str, SuspicionLevel]]:
+) -> list[dict]:
     """규칙 엔진 패턴 태그 기준으로 관련 가설만 선택"""
+    hypotheses_config = _load_hypotheses_config()
     selected = []
     for pattern in rule_patterns:
-        selected.extend(VIOLATION_HYPOTHESES.get(pattern, []))
+        for item in hypotheses_config.get(pattern, []):
+            if item["enabled"]:
+                selected.append(item)
     return selected
 
 
@@ -154,11 +188,12 @@ def verify_with_nli(
         best_contradiction = 0.0
         best_level        = None
 
-        for hypothesis, level in hypotheses:
-            entail, contra = _get_nli_probs(sentence, hypothesis)
-            if entail > best_entailment:
-                best_entailment = entail
-                best_level      = level
+        for item in hypotheses:
+            entail, contra = _get_nli_probs(sentence, item["hypothesis"])
+            weighted_entail = entail * item["weight"]
+            if weighted_entail > best_entailment:
+                best_entailment = weighted_entail
+                best_level      = item["level"]
             if contra > best_contradiction:
                 best_contradiction = contra
 
