@@ -259,6 +259,7 @@ def parse_args():
     )
     parser.add_argument("--epochs", type=int, default=None, help=f"에폭 수 (기본값: {EPOCHS})")
     parser.add_argument("--lr",     type=float, default=None, help="학습률 (기본값: 모드에 따라 자동 설정)")
+    parser.add_argument("--data",   type=str,   default=MERGED_PATH, help="학습에 사용할 merged CSV 경로")
     parser.add_argument(
         "--no-eval",
         action="store_true",
@@ -299,7 +300,7 @@ def train():
     amp_enabled = (device.type == "cuda") and (not args.no_amp)
 
     # 데이터 준비
-    df = load_data(MERGED_PATH)
+    df = load_data(args.data)
     df = preprocess(df)
     train_df, val_df = train_test_split(
         df, test_size=0.2, random_state=42, stratify=df["label"]
@@ -471,7 +472,7 @@ def train():
             print("\n  모델 저장 후 고정 검증셋 평가 중...")
             _, metrics_path = evaluate_and_save(
                 model_dir=MODEL_SAVE_PATH,
-                data=MERGED_PATH,
+                data=args.data,
                 seed=SEED,
                 test_size=0.2,
                 batch_size=BATCH_SIZE,
