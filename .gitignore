@@ -13,6 +13,8 @@ data/merged/
 data/raw/
 data/clean/
 data/training/
+data/curation/
+data/eval/
 
 # Python 캐시
 __pycache__/
