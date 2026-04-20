@@ -105,6 +105,20 @@
       "enabled": true
     }
   ],
+  "검증오인": [
+    {
+      "hypothesis": "이 문장은 임상이나 시험 결과가 특정 효능을 입증하거나 검증했다고 주장한다",
+      "level": "SUSPICIOUS",
+      "weight": 1.0,
+      "enabled": true
+    },
+    {
+      "hypothesis": "이 문장은 임상적으로 효과가 보장되거나 증명되었다고 단정한다",
+      "level": "SUSPICIOUS",
+      "weight": 0.95,
+      "enabled": true
+    }
+  ],
   "비교우위": [
     {
       "hypothesis": "이 문장은 다른 제품보다 이 제품이 더 우수하다고 주장한다",

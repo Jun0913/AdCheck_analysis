@@ -36,6 +36,7 @@ MIN_PATTERN_LEVELS: dict[str, SuspicionLevel] = {
     "효능과장": SuspicionLevel.SUSPICIOUS,
     "안전성단정": SuspicionLevel.SUSPICIOUS,
     "추천보증": SuspicionLevel.SUSPICIOUS,
+    "검증오인": SuspicionLevel.SUSPICIOUS,
     "기능성오인": SuspicionLevel.CAUTION,
     "첨단기술오인": SuspicionLevel.CAUTION,
     "비교우위": SuspicionLevel.CAUTION,
@@ -48,8 +49,11 @@ _PATTERN_DESC: dict[str, str] = {
     "기능성오인":  "기능성 화장품 심사 없이 기능성을 주장하는 표현",
     "안전성단정":  "안전성을 근거 없이 단정하는 표현",
     "추천보증":   "전문가 추천·인증을 주장하는 표현",
+    "검증오인":   "임상·시험 결과를 효능 보장처럼 단정하는 표현",
     "비교우위":   "근거 없이 타사 대비 우위를 주장하는 표현",
 }
+
+CAUTION_ONLY_PATTERNS = {"기능성오인", "첨단기술오인", "비교우위"}
 
 def _build_kobert_reason(level: SuspicionLevel, rule_result: SentenceResult, weighted_score: float) -> str:
     """KoBERT가 규칙기반보다 높은 의심도를 채택할 때 이유 생성"""
@@ -234,6 +238,13 @@ async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> Sen
             rule_result.suspicion_level == SuspicionLevel.CAUTION
             and rule_result.matched_keywords
             and kobert_level == SuspicionLevel.NORMAL
+        ):
+            kobert_level = SuspicionLevel.CAUTION
+
+        if (
+            kobert_level == SuspicionLevel.SUSPICIOUS
+            and rule_result.matched_patterns
+            and set(rule_result.matched_patterns).issubset(CAUTION_ONLY_PATTERNS)
         ):
             kobert_level = SuspicionLevel.CAUTION
 

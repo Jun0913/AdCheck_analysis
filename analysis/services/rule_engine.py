@@ -48,6 +48,14 @@ STRICT_ALLOW_KEYWORDS: list[str] = [
     "피부 수분 유지에 도움",
 ]
 
+STRICT_ALLOW_EXTRA_KEYWORDS: list[str] = [
+    "탈모 증상 완화에 도움",
+    "탈모 증상 완화에 도움을 주는 화장품",
+    "피부 손상 예방 및 개선",
+    "여드름성 피부에 사용에 적합",
+    "여드름성 피부 사용 적합",
+]
+
 CONTEXT_ALLOW_KEYWORDS: list[str] = [
     # 피부과 테스트
     "피부과 테스트 완료",
@@ -139,8 +147,7 @@ FORBIDDEN_KEYWORDS: dict[str, list[str]] = {
         "전부 없애", "전부 제거", "전부 사라진다", "모두 사라진다", "다 사라진다", "싹 사라진다",
         "싹 없어짐", "말끔히 사라진다", "깨끗이 사라진다", "완전히 사라진다", "흔적 없이 사라진다",
         # 최상급 과장
-        "최강", "세계 최고", "세계 최초", "국내 유일",
-        "업계 최초", "국내 최초", "아시아 최초",
+        "최강", "세계 최고",
         "압도적", "독보적",
         # 부정적 단정
         "무조건", "절대적", "절대 효과",
@@ -219,6 +226,24 @@ FORBIDDEN_REGEX_PATTERNS: dict[str, list[tuple[str, str]]] = {
         (r"(의사|피부과|전문의|약사|한의사)[가-힣]*\s*추천", "전문가 추천"),
         (r"(의사|병원|피부과|전문의)[가-힣]*\s*인증", "전문가 인증"),
         (r"(의사|병원|피부과|전문의)[가-힣]*\s*처방", "전문가 처방"),
+        (r"(FDA|식약처|식품의약품안전처|미국\s*FDA)[가-힣A-Za-z\s]*\s*인증", "공인기관 인증"),
+        (r"(의사|피부과|전문의|약사|한의사)[가-힣]*\s*(개발|설계|공동개발)", "전문가 개발"),
+        (r"(병원|클리닉|연구소)[가-힣]*\s*공동개발", "기관 공동개발"),
+        (r"(후기|리뷰|사용자\s*리뷰)\s*인증", "후기 인증"),
+        (r"(전\s*/\s*후|전후)\s*사진", "전후 사진"),
+    ],
+    "검증오인": [
+        (
+            r"(임상(적으로)?|인체\s*적용\s*시험(으로|에서)?|테스트(로|에서)?)[가-힣A-Za-z0-9\s]{0,30}?(입증|검증|확인|증명|보장)",
+            "임상 입증",
+        ),
+    ],
+    "비교우위": [
+        (r"(국내|업계|세계|전국)\s*(1위|최초)", "1위/최초"),
+        (r"\b(BEST|Best|best)\b", "BEST"),
+        (r"\bNo\.?\s*1\b", "No.1"),
+        (r"(타사|기존\s*제품|경쟁사)\s*대비\s*\d+\s*배", "대비 2배"),
+        (r"(기존\s*제품|타사\s*제품|타사)\s*보다\s*(더\s*)?(우수|뛰어난|좋은|강력한)", "타사 대비 우수"),
     ],
     "효능과장": [
         (r"반드시\s*[가-힣]+\w*", "반드시"),
@@ -253,16 +278,13 @@ COSMETIC_DOMAIN_NOUNS: frozenset[str] = frozenset({
     "메이크업", "코스메틱", "화장",
     # 피부·두피·모발
     "피부", "두피", "모발", "모공", "주름", "미백", "보습",
-    "탄력", "피부톤", "피부결", "피부장벽", "각질", "탈모",
+    "탄력", "피부톤", "피부결", "피부장벽", "장벽", "각질", "탈모", "리프팅",
     # 성분·제형
-    "성분", "제형", "함유", "원료", "추출물",
+    "성분", "제형", "함유", "원료", "추출물", "포뮬러",
     # 기능성
     "자외선차단", "기능성화장품",
-    "??",
     "잡티",
 })
-
-COSMETIC_DOMAIN_NOUNS = COSMETIC_DOMAIN_NOUNS.union({"\uC7A1\uD2F0"})
 
 
 
@@ -293,7 +315,9 @@ def _find_forbidden_patterns(sentence: str) -> tuple[list[str], list[str]]:
 
 
 def _find_whitelist_matches(sentence: str) -> list[str]:
-    return [kw for kw in STRICT_ALLOW_KEYWORDS if kw in sentence]
+    matches = [kw for kw in STRICT_ALLOW_KEYWORDS if kw in sentence]
+    matches.extend(kw for kw in STRICT_ALLOW_EXTRA_KEYWORDS if kw in sentence)
+    return matches
 
 
 def _find_context_allow_matches(sentence: str) -> list[str]:
@@ -317,18 +341,24 @@ def _is_clearly_allowed_sentence(sentence: str, whitelist_matches: list[str]) ->
     return len(meaningful_tokens) <= 1
 
 
-CAUTION_KEYWORDS: list[str] = [
-    "\u0032\u0034\uC2DC\uAC04", "\uC9C0\uC18D", "\uC9C0\uC18D\uB825", "\uC720\uC9C0",
-    "\uB860\uB798\uC2A4\uD305", "\uB860\uC6E8\uC5B4", "long lasting", "long-lasting",
-    "해결",
-]
-
-
-
-
 # ────────────────────────────────────────────
 # 패턴 태그 → 한국어 설명 매핑
 # ────────────────────────────────────────────
+CAUTION_KEYWORDS: list[str] = [
+    "24시간",
+    "롱래스팅",
+    "론웨어",
+    "long lasting",
+    "long-lasting",
+    "해결",
+]
+
+CAUTION_REGEX_PATTERNS: list[tuple[str, str]] = [
+    (r"24\s*시간", "24시간"),
+    (r"(하루\s*종일|오래)\s*지속", "지속"),
+    (r"(임상\s*테스트|인체\s*적용\s*시험)\s*(완료|완료됨|기반)", "임상 테스트"),
+]
+
 
 _PATTERN_DESC: dict[str, str] = {
     "의약품오인":  "의약품으로 오인될 수 있는 표현",
@@ -336,9 +366,22 @@ _PATTERN_DESC: dict[str, str] = {
     "기능성오인":  "기능성 화장품 심사 없이 기능성을 주장하는 표현",
     "안전성단정":  "안전성을 근거 없이 단정하는 표현",
     "추천보증":   "전문가 추천·인증을 주장하는 표현",
+    "검증오인":   "임상·시험 결과를 효능 보장처럼 단정하는 표현",
     "비교우위":   "근거 없이 타사 대비 우위를 주장하는 표현",
     "첨단기술오인": "첨단 기술·세포 재생을 근거 없이 강조하는 표현",
     "강력금지":   "100%, 영구, 완치 등 과도한 보장/단정 표현",
+}
+
+_PATTERN_RULE_LEVELS: dict[str, SuspicionLevel] = {
+    "의약품오인": SuspicionLevel.SUSPICIOUS,
+    "효능과장": SuspicionLevel.SUSPICIOUS,
+    "기능성오인": SuspicionLevel.CAUTION,
+    "안전성단정": SuspicionLevel.SUSPICIOUS,
+    "추천보증": SuspicionLevel.SUSPICIOUS,
+    "검증오인": SuspicionLevel.SUSPICIOUS,
+    "비교우위": SuspicionLevel.CAUTION,
+    "첨단기술오인": SuspicionLevel.CAUTION,
+    "강력금지": SuspicionLevel.SUSPICIOUS,
 }
 
 
@@ -374,10 +417,26 @@ def analyze_sentence(sentence: str, *, force_cosmetic: bool = False) -> Sentence
             score=0.0,
         )
 
+    extra_allow_matches = [kw for kw in STRICT_ALLOW_EXTRA_KEYWORDS if kw in normalized_sentence]
+    if extra_allow_matches and _is_clearly_allowed_sentence(normalized_sentence, extra_allow_matches):
+        return SentenceResult(
+            sentence=sentence,
+            suspicion_level=SuspicionLevel.NORMAL,
+            matched_keywords=[],
+            matched_patterns=[],
+            reason="허용된 기능성 표현 중심의 문구로 판단됩니다.",
+            score=0.0,
+        )
+
     matched_keywords, matched_patterns = _find_forbidden_patterns(normalized_sentence)
 
     # 주의 키워드 검사
     caution_matches = [kw for kw in CAUTION_KEYWORDS if kw in normalized_sentence]
+    caution_matches.extend(
+        label
+        for pattern, label in CAUTION_REGEX_PATTERNS
+        if re.search(pattern, normalized_sentence)
+    )
     matched_keywords.extend(caution_matches)
 
     # ── 화이트리스트 체크 ───────────────────────────────────
@@ -406,9 +465,14 @@ def analyze_sentence(sentence: str, *, force_cosmetic: bool = False) -> Sentence
 
     # 의심도 결정 + 규칙 기반 연속 점수
     if matched_patterns:
-        level = SuspicionLevel.SUSPICIOUS
-        # 패턴 수에 따라 점수 차등 (0.70 ~ 0.90)
-        base_score = round(min(0.70 + len(matched_patterns) * 0.05, 0.90), 3)
+        level = max(
+            (_PATTERN_RULE_LEVELS.get(pattern, SuspicionLevel.SUSPICIOUS) for pattern in matched_patterns),
+            key=lambda lvl: {SuspicionLevel.NORMAL: 0, SuspicionLevel.CAUTION: 1, SuspicionLevel.SUSPICIOUS: 2}[lvl],
+        )
+        if level == SuspicionLevel.SUSPICIOUS:
+            base_score = round(min(0.70 + len(matched_patterns) * 0.05, 0.90), 3)
+        else:
+            base_score = round(min(0.35 + len(matched_patterns) * 0.05, 0.55), 3)
         reason = _build_reason(matched_patterns, matched_keywords)
     elif caution_matches:
         level = SuspicionLevel.CAUTION
@@ -437,6 +501,7 @@ _PATTERN_REASON_TEMPLATE: dict[str, str] = {
     "기능성오인":  "'{kw}' 표현은 식약처 기능성 심사 없이 기능성을 주장하는 표현으로, 허가받지 않은 효능 광고에 해당할 수 있습니다.",
     "안전성단정":  "'{kw}' 표현은 과학적 근거 없이 안전성을 단정하는 표현입니다. 화장품은 부작용이 없다고 단정할 수 없습니다.",
     "추천보증":   "'{kw}' 표현은 전문가 추천·인증을 주장하는 표현으로, 실제 근거 없이 사용 시 허위광고에 해당할 수 있습니다.",
+    "검증오인":   "'{kw}' 표현은 임상·시험 결과가 특정 효능을 입증·보장한 것처럼 단정하는 표현으로, 소비자를 오인하게 할 수 있습니다.",
     "비교우위":   "'{kw}' 표현은 근거 없이 타사 대비 우위를 주장하는 표현으로, 비교광고 기준에 위반될 수 있습니다.",
 }
 
