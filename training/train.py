@@ -32,7 +32,7 @@ import argparse
 import numpy as np
 import pandas as pd
 import torch
-from datetime import datetime
+import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import autocast, GradScaler
 from transformers import (
@@ -183,33 +183,11 @@ def find_latest_checkpoint():
     return latest, epoch
 
 
-# ────────────────────────────────────────────
-# 검증
-# ────────────────────────────────────────────
-
-def evaluate(model, val_loader, device, epoch):
-    model.eval()
-    preds, true_labels = [], []
-    with torch.no_grad():
-        for batch in val_loader:
-            input_ids      = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            outputs        = model(input_ids=input_ids, attention_mask=attention_mask)
-            pred           = torch.argmax(outputs.logits, dim=-1).cpu().tolist()
-            preds.extend(pred)
-            true_labels.extend(batch["labels"].tolist())
-
-    print(f"\n  [Epoch {epoch} 검증 결과]")
-    print(classification_report(
-        true_labels, preds,
-        target_names=LABEL_NAMES,
-        zero_division=0
-    ))
-
 def evaluate_with_loss(model, val_loader, device, epoch):
     model.eval()
     preds, true_labels = [], []
     total_loss, steps = 0.0, 0
+    loss_fn = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTH)
     with torch.no_grad():
         for batch in val_loader:
             input_ids      = batch["input_ids"].to(device)
@@ -218,10 +196,9 @@ def evaluate_with_loss(model, val_loader, device, epoch):
             outputs        = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                labels=labels,
-                label_smoothing_factor=LABEL_SMOOTH,
             )
-            total_loss    += outputs.loss.item()
+            loss          = loss_fn(outputs.logits, labels)
+            total_loss    += loss.item()
             steps         += 1
             pred           = torch.argmax(outputs.logits, dim=-1).cpu().tolist()
             preds.extend(pred)
@@ -367,6 +344,7 @@ def train():
         num_training_steps=total_steps,
     )
     scaler = GradScaler(enabled=amp_enabled)
+    loss_fn = nn.CrossEntropyLoss(label_smoothing=LABEL_SMOOTH)
 
     if args.resume and ckpt_path:
         state = torch.load(
@@ -406,10 +384,8 @@ def train():
                 outputs = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    labels=labels,
-                    label_smoothing_factor=LABEL_SMOOTH,
                 )
-                loss = outputs.loss
+                loss = loss_fn(outputs.logits, labels)
 
             scaler.scale(loss).backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
