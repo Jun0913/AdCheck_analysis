@@ -341,7 +341,7 @@ def parse_args():
     parser.add_argument(
         "-o", "--output",
         default=None,
-        help="출력 파일명 (기본값: merged_clean_YYYYMMDD_HHMMSS.csv)"
+        help="출력 파일명 (기본값: data/merged/merged_clean.csv)"
     )
     parser.add_argument(
         "--no-dedup",

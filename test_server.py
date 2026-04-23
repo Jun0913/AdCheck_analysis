@@ -13,7 +13,6 @@ import sys
 import os
 import urllib.request
 import urllib.error
-import signal
 import atexit
 
 BASE_URL = "http://localhost:8000"
@@ -57,8 +56,6 @@ def stop_server():
 
 # 스크립트 종료 시 서버도 자동 종료
 atexit.register(stop_server)
-
-
 
 
 def request(method: str, path: str, body: dict = None) -> dict:

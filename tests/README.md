@@ -1,29 +1,24 @@
 # 테스트 가이드
 
-FastAPI 분석 서버가 실행 중인 상태에서 아래 테스트를 실행하세요.
+대부분의 테스트는 FastAPI `TestClient`를 사용하므로 별도 서버 실행 없이 실행할 수 있습니다.
 
-## 서버 먼저 실행
+## 전체 테스트
 
 ```bash
-# PyCharm에서 test_server.py 실행
-# 또는 터미널에서
+pytest -q
+```
+
+## 주요 테스트 파일
+
+- `tests/test_api_analyze.py`: API 엔드포인트, URL/이미지 입력 처리
+- `tests/test_pipeline_regression.py`: 룰 엔진 + KoBERT 파이프라인 회귀 테스트
+- `tests/test_ocr_postprocess.py`: OCR 후처리 및 문장 병합 테스트
+
+## 수동 서버 테스트
+
+실제 서버를 띄워 수동으로 확인하려면 아래 명령을 사용합니다.
+
+```bash
 uvicorn analysis.main:app --port 8000
-```
-
-## 테스트 실행
-
-```bash
-# 텍스트 분석 테스트
-python tests/test_quick.py
-
-# URL 분석 테스트
-python tests/test_url.py
-```
-
-## test_server.py (루트)
-
-서버 자동 실행 + 전체 시나리오 테스트를 한 번에 실행합니다.
-
-```bash
 python test_server.py
 ```
