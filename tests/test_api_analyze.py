@@ -150,3 +150,17 @@ def test_analyze_image_rejects_non_image_file():
 
     assert response.status_code == 400
     assert response.json()["detail"] == "이미지 파일만 업로드 가능합니다."
+
+
+def test_analyze_text_does_not_drop_sentence_only_because_ad_filter_is_negative(monkeypatch):
+    monkeypatch.setattr(analyze_router, "predict_ad", lambda _: (False, 0.02))
+    monkeypatch.setattr(analyze_router, "predict_cosmetic", lambda _: (False, 0.01))
+
+    with TestClient(app) as client:
+        response = _post_text(client, "이 크림은 아토피를 치료합니다.")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["overall_suspicion_level"] == "의심"
+    assert payload["sentence_results"][0]["suspicion_level"] == "의심"
+    assert "건너뜀" not in payload["sentence_results"][0]["reason"]

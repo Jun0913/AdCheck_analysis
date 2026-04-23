@@ -16,7 +16,10 @@ OCR_PRIMARY_MIN_SCORE = 0.45
 OCR_PRIMARY_MIN_TEXT_LEN = 12
 OCR_CORRECTIONS = {
     "피부릍": "피부를",
+    "피부륻": "피부를",
+    "피부률": "피부를",
     "주릅": "주름",
+    "주름개선": "주름 개선",
     "효과보장입나다": "효과 보장입니다",
     "효과보장": "효과 보장",
     "아토피를료": "아토피 치료",
@@ -26,6 +29,21 @@ OCR_CORRECTIONS = {
     "피부치밀도도": "피부치밀도",
     "인체적용시힘 완료": "인체적용시험 완료",
     "인체적용시험 완로": "인체적용시험 완료",
+    "인체적용시혐": "인체적용시험",
+    "기미잡리": "기미잡티",
+    "기미 잡리": "기미 잡티",
+    "잠티": "잡티",
+    "탄력저하": "탄력 저하",
+    "지쳐보이틀": "지쳐 보이는",
+    "지쳐보이는": "지쳐 보이는",
+    "지처보이는": "지쳐 보이는",
+    "피부결": "피부 결",
+    "로리셋": "로 리셋",
+    "리셋하세오": "리셋하세요",
+    "리셋하서요": "리셋하세요",
+    "쎄럼": "세럼",
+    "앰풀": "앰플",
+    "크림입나다": "크림입니다",
 }
 
 
@@ -55,6 +73,7 @@ def _normalize_ocr_text(text: str) -> str:
         cleaned = cleaned.replace(src, dst)
     cleaned = re.sub(r"(?<=\d)\s*/\s*(?=\d)", "/", cleaned)
     cleaned = re.sub(r"(?<=\d)\s*mm", "mm", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(?<=[가-힣])\s*/\s*(?=[가-힣])", "/", cleaned)
     cleaned = re.sub(r"0\.\s*5mm/15mm", "0.5mm/1.5mm", cleaned)
     cleaned = re.sub(r"0\.5mm/15mm", "0.5mm/1.5mm", cleaned)
     cleaned = re.sub(r"0\.5mm/1Smm", "0.5mm/1.5mm", cleaned)
@@ -182,19 +201,39 @@ def _build_ocr_variants(image_bytes: bytes) -> list[tuple[str, bytes]]:
         )
         variants.append(("adaptive_threshold", _encode_png(adaptive)))
 
+        adaptive_inv = cv2.bitwise_not(adaptive)
+        variants.append(("adaptive_threshold_inverted", _encode_png(adaptive_inv)))
+
         sharpen_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
         sharpened = cv2.filter2D(contrast, -1, sharpen_kernel)
         variants.append(("sharpened", _encode_png(sharpened)))
 
         otsu = cv2.threshold(contrast, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
         variants.append(("otsu_threshold", _encode_png(otsu)))
+
+        otsu_inv = cv2.bitwise_not(otsu)
+        variants.append(("otsu_threshold_inverted", _encode_png(otsu_inv)))
+
+        # Small, low-contrast ad text benefits from stronger enlargement.
+        super_res = cv2.resize(gray, None, fx=2.8, fy=2.8, interpolation=cv2.INTER_CUBIC)
+        super_res = cv2.GaussianBlur(super_res, (0, 0), 0.6)
+        super_res = cv2.addWeighted(super_res, 1.6, cv2.GaussianBlur(super_res, (0, 0), 2.0), -0.6, 0)
+        variants.append(("super_res_sharpened", _encode_png(super_res)))
     except Exception:
         return variants
 
     return [(name, data) for name, data in variants if data]
 
 
-def _run_easyocr_once(image_bytes: bytes, *, text_threshold: float, low_text: float, link_threshold: float) -> dict:
+def _run_easyocr_once(
+    image_bytes: bytes,
+    *,
+    text_threshold: float,
+    low_text: float,
+    link_threshold: float,
+    min_confidence: float,
+    mag_ratio: float,
+) -> dict:
     reader = _get_easy_reader()
     result = reader.readtext(
         image_bytes,
@@ -203,14 +242,17 @@ def _run_easyocr_once(image_bytes: bytes, *, text_threshold: float, low_text: fl
         text_threshold=text_threshold,
         low_text=low_text,
         link_threshold=link_threshold,
-        mag_ratio=1.5,
+        mag_ratio=mag_ratio,
+        contrast_ths=0.05,
+        adjust_contrast=0.7,
+        width_ths=0.9,
     )
     if not result:
         return {"text": "", "score": 0.0, "confidences": [], "raw_count": 0}
 
     result.sort(key=lambda x: (x[0][0][1], x[0][0][0]))
-    lines = [item[1] for item in result if item[2] > 0.35]
-    confidences = [float(item[2]) for item in result if item[2] > 0.35]
+    lines = [item[1] for item in result if item[2] >= min_confidence]
+    confidences = [float(item[2]) for item in result if item[2] >= min_confidence]
     text = _normalize_ocr_text("\n".join(lines))
     return {
         "text": text,
@@ -224,7 +266,13 @@ def _extract_with_easyocr_variants(image_bytes: bytes) -> str:
     variants = _build_ocr_variants(image_bytes)
     best = {"text": "", "score": 0.0}
 
-    primary_settings = {"text_threshold": 0.4, "low_text": 0.3, "link_threshold": 0.3}
+    primary_settings = {
+        "text_threshold": 0.4,
+        "low_text": 0.3,
+        "link_threshold": 0.3,
+        "min_confidence": 0.35,
+        "mag_ratio": 1.7,
+    }
     for name, variant_bytes in variants:
         candidate = _run_easyocr_once(variant_bytes, **primary_settings)
         if candidate["score"] > best["score"]:
@@ -247,8 +295,14 @@ def _extract_with_easyocr_variants(image_bytes: bytes) -> str:
         return best["text"]
 
     # Fallback: relax thresholds and retry on the top variants.
-    fallback_settings = {"text_threshold": 0.25, "low_text": 0.15, "link_threshold": 0.2}
-    for name, variant_bytes in variants[:3]:
+    fallback_settings = {
+        "text_threshold": 0.22,
+        "low_text": 0.12,
+        "link_threshold": 0.18,
+        "min_confidence": 0.22,
+        "mag_ratio": 2.0,
+    }
+    for name, variant_bytes in variants:
         candidate = _run_easyocr_once(variant_bytes, **fallback_settings)
         if candidate["score"] > best["score"]:
             best = {**candidate, "variant": name}
@@ -495,8 +549,8 @@ def extract_from_image(image_bytes: bytes) -> str:
 def split_sentences(text: str) -> list[str]:
     """텍스트를 문장 단위로 분리 (kss 우선, 없으면 정규식 폴백)"""
     if _KSS_AVAILABLE:
-        return _split_with_kss(text)
-    return _split_with_regex(text)
+        return _merge_sentence_fragments(_split_with_kss(text))
+    return _merge_sentence_fragments(_split_with_regex(text))
 
 
 def _split_with_kss(text: str) -> list[str]:
@@ -516,3 +570,79 @@ def _split_with_regex(text: str) -> list[str]:
     """정규식 기반 문장 분리 (폴백용)"""
     sentences = re.split(r"(?<=[.!?])\s+|[\n]+", text)
     return [s.strip() for s in sentences if len(s.strip()) > 3]
+
+
+_SENTENCE_END_RE = re.compile(
+    r"([.!?。！？]$|"
+    r"(습니다|합니다|됩니다|했습니다|드립니다|입니다|합니다|하세요|돼요|해요|나요|어요|아요|다|요)$)"
+)
+
+
+def _looks_complete_sentence(text: str) -> bool:
+    return bool(_SENTENCE_END_RE.search(text.strip()))
+
+
+def _is_short_ocr_fragment(text: str) -> bool:
+    """
+    OCR 광고 이미지는 카피가 줄 단위로 끊겨 들어오는 경우가 많다.
+    완결 문장이 아닌 짧은 줄은 다음 줄과 합쳐 문맥을 보존한다.
+    """
+    s = text.strip()
+    if _looks_complete_sentence(s):
+        return False
+
+    token_count = len(s.split())
+    compact_len = len(re.sub(r"\s+", "", s))
+    has_space = " " in s
+
+    return (
+        compact_len <= 18
+        or (not has_space and compact_len <= 28)
+        or (token_count <= 5 and compact_len <= 34)
+    )
+
+
+def _flush_fragment_buffer(buffer: list[str], merged: list[str]) -> None:
+    if buffer:
+        merged.append(" ".join(buffer).strip())
+        buffer.clear()
+
+
+def _merge_sentence_fragments(sentences: list[str]) -> list[str]:
+    """
+    줄바꿈 기반 OCR 조각을 의미 단위로 재결합한다.
+    예: "기미잡티\\n탄력저하\\n...\\n리셋하세요" -> 한 카피 문장
+    """
+    merged: list[str] = []
+    buffer: list[str] = []
+    max_merged_len = 110
+
+    for sentence in sentences:
+        s = sentence.strip()
+        if not s:
+            continue
+
+        if not buffer:
+            if _is_short_ocr_fragment(s):
+                buffer.append(s)
+            else:
+                merged.append(s)
+            continue
+
+        candidate_len = len(" ".join(buffer + [s]))
+        if candidate_len <= max_merged_len and (
+            _is_short_ocr_fragment(s) or not _looks_complete_sentence(buffer[-1])
+        ):
+            buffer.append(s)
+            if _looks_complete_sentence(s) or candidate_len >= max_merged_len:
+                _flush_fragment_buffer(buffer, merged)
+            continue
+
+        _flush_fragment_buffer(buffer, merged)
+        if _is_short_ocr_fragment(s):
+            buffer.append(s)
+        else:
+            merged.append(s)
+
+    _flush_fragment_buffer(buffer, merged)
+    return merged

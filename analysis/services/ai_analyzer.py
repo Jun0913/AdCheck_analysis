@@ -38,8 +38,10 @@ MIN_PATTERN_LEVELS: dict[str, SuspicionLevel] = {
     "추천보증": SuspicionLevel.SUSPICIOUS,
     "검증오인": SuspicionLevel.SUSPICIOUS,
     "기능성오인": SuspicionLevel.CAUTION,
+    "고위험기능성오인": SuspicionLevel.SUSPICIOUS,
     "첨단기술오인": SuspicionLevel.CAUTION,
     "비교우위": SuspicionLevel.CAUTION,
+    "주의예외": SuspicionLevel.CAUTION,
 }
 
 # 패턴 태그 → 한국어 설명 (rule_engine과 동일하게 유지)
@@ -51,9 +53,32 @@ _PATTERN_DESC: dict[str, str] = {
     "추천보증":   "전문가 추천·인증을 주장하는 표현",
     "검증오인":   "임상·시험 결과를 효능 보장처럼 단정하는 표현",
     "비교우위":   "근거 없이 타사 대비 우위를 주장하는 표현",
+    "고위험기능성오인": "기능성 범위를 넘어 신체 변화·의약품 효능처럼 보이는 고위험 표현",
+    "주의예외": "허용 가능성이 있으나 주의 단계로 유지해야 하는 표현",
 }
 
-CAUTION_ONLY_PATTERNS = {"기능성오인", "첨단기술오인", "비교우위"}
+CAUTION_ONLY_PATTERNS = {"기능성오인", "첨단기술오인", "비교우위", "주의예외"}
+
+
+def _resolve_kobert_level(rule_result: SentenceResult, weighted_score: float) -> SuspicionLevel:
+    """룰 결과와 KoBERT 가중 점수를 조합해 최종 레벨을 결정한다."""
+    if rule_result.suspicion_level == SuspicionLevel.SUSPICIOUS:
+        if weighted_score >= 0.55:
+            return SuspicionLevel.SUSPICIOUS
+        return SuspicionLevel.CAUTION
+
+    if rule_result.suspicion_level == SuspicionLevel.CAUTION:
+        if weighted_score >= 0.60:
+            return SuspicionLevel.SUSPICIOUS
+        if weighted_score >= 0.30:
+            return SuspicionLevel.CAUTION
+        return SuspicionLevel.NORMAL
+
+    if weighted_score >= 0.80:
+        return SuspicionLevel.SUSPICIOUS
+    if weighted_score >= 0.55:
+        return SuspicionLevel.CAUTION
+    return SuspicionLevel.NORMAL
 
 def _build_kobert_reason(level: SuspicionLevel, rule_result: SentenceResult, weighted_score: float) -> str:
     """KoBERT가 규칙기반보다 높은 의심도를 채택할 때 이유 생성"""
@@ -205,34 +230,7 @@ async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> Sen
             weighted_score *= 0.6
 
         # ── 가중 점수 → 의심도 레벨 변환 ────────────────────
-        # 규칙기반 결과에 따라 임계값 차등 적용
-        # - 규칙기반이 의심: KoBERT가 확인/하향 조정
-        # - 규칙기반이 주의: KoBERT가 올리거나 내릴 수 있음
-        # - 규칙기반이 정상: KoBERT 임계값 높여서 과탐지 방지
-        if rule_result.suspicion_level == SuspicionLevel.SUSPICIOUS:
-            # 규칙기반이 의심 → KoBERT가 확인/하향 조정
-            if weighted_score >= 0.55:
-                kobert_level = SuspicionLevel.SUSPICIOUS
-            elif weighted_score >= 0.30:
-                kobert_level = SuspicionLevel.CAUTION
-            else:
-                kobert_level = SuspicionLevel.CAUTION  # 최소 주의 유지
-        elif rule_result.suspicion_level == SuspicionLevel.CAUTION:
-            # 규칙기반이 주의 → 올릴 수도 내릴 수도 있음 (보수적)
-            if weighted_score >= 0.60:
-                kobert_level = SuspicionLevel.SUSPICIOUS
-            elif weighted_score >= 0.30:
-                kobert_level = SuspicionLevel.CAUTION
-            else:
-                kobert_level = SuspicionLevel.NORMAL
-        else:
-            # 규칙기반이 정상 → 임계값을 더 높여 과탐지 방지
-            if weighted_score >= 0.80:
-                kobert_level = SuspicionLevel.SUSPICIOUS
-            elif weighted_score >= 0.55:
-                kobert_level = SuspicionLevel.CAUTION
-            else:
-                kobert_level = SuspicionLevel.NORMAL
+        kobert_level = _resolve_kobert_level(rule_result, weighted_score)
 
         if (
             rule_result.suspicion_level == SuspicionLevel.CAUTION
