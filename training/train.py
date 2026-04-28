@@ -43,7 +43,6 @@ from transformers import (
 from torch.optim import AdamW
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report
-from eval import evaluate_and_save
 
 # ────────────────────────────────────────────
 # 설정
@@ -92,7 +91,7 @@ def get_device():
         print(f"  GPU 사용: {gpu_name} (VRAM: {vram:.1f}GB)")
     else:
         device = torch.device("cpu")
-        print("  ⚠️  GPU를 찾을 수 없어 CPU로 실행합니다.")
+        print("  [warning] GPU를 찾을 수 없어 CPU로 실행합니다.")
         print("  PyTorch CUDA 버전이 설치되어 있는지 확인하세요.")
         print("  확인: python -c \"import torch; print(torch.cuda.is_available())\"")
     return device
@@ -237,6 +236,12 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=None, help=f"에폭 수 (기본값: {EPOCHS})")
     parser.add_argument("--lr",     type=float, default=None, help="학습률 (기본값: 모드에 따라 자동 설정)")
     parser.add_argument("--data",   type=str,   default=MERGED_PATH, help="학습에 사용할 merged CSV 경로")
+    parser.add_argument("--save-dir", type=str, default=MODEL_SAVE_PATH, help="학습된 모델 저장 경로")
+    parser.add_argument("--ckpt-dir", type=str, default=CKPT_DIR, help="체크포인트 저장 경로")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help=f"배치 크기 (기본값: {BATCH_SIZE})")
+    parser.add_argument("--max-len", type=int, default=MAX_LEN, help=f"토큰 최대 길이 (기본값: {MAX_LEN})")
+    parser.add_argument("--num-workers", type=int, default=None, help="DataLoader worker 수 (기본값: GPU=4, CPU=0)")
+    parser.add_argument("--require-gpu", action="store_true", help="GPU가 없으면 바로 종료")
     parser.add_argument(
         "--no-eval",
         action="store_true",
@@ -258,6 +263,10 @@ def train():
     args   = parse_args()
     epochs = args.epochs or EPOCHS
     amp_enabled = False
+    model_save_path = args.save_dir
+    ckpt_dir = args.ckpt_dir
+    batch_size = args.batch_size
+    max_len = args.max_len
 
     # 학습률: scratch면 2e-5, finetune이면 1e-5, 직접 지정 시 그값
     if args.lr:
@@ -269,11 +278,13 @@ def train():
 
     print("\n" + "=" * 55)
     mode_label = "새로 학습 (scratch)" if args.scratch else "추가학습 (finetune)"
-    print(f"  KoBERT 광고 의심도 분류기 — {mode_label}")
+    print(f"  KoBERT 광고 의심도 분류기 - {mode_label}")
     print("=" * 55)
 
     set_seed(SEED)
     device = get_device()
+    if args.require_gpu and device.type != "cuda":
+        raise RuntimeError("--require-gpu가 설정되었지만 CUDA를 사용할 수 없습니다.")
     amp_enabled = (device.type == "cuda") and (not args.no_amp)
 
     # 데이터 준비
@@ -288,6 +299,9 @@ def train():
     # 1순위: --resume 플래그 + 체크포인트 존재 (중단된 세션 복구)
     # 2순위: 기존 저장 모델 kobert_ad_classifier (finetune 기본 동작)
     # 3순위: base KoBERT (--scratch 또는 저장 모델 없음)
+    global MODEL_SAVE_PATH, CKPT_DIR
+    MODEL_SAVE_PATH = model_save_path
+    CKPT_DIR = ckpt_dir
     ckpt_path, start_epoch = find_latest_checkpoint()
 
     if args.resume and ckpt_path:
@@ -296,17 +310,17 @@ def train():
         model     = AutoModelForSequenceClassification.from_pretrained(
             ckpt_path, num_labels=NUM_LABELS
         )
-    elif not args.scratch and os.path.exists(MODEL_SAVE_PATH):
-        print(f"\n  [finetune] 기존 모델에서 추가학습: {MODEL_SAVE_PATH}")
+    elif not args.scratch and os.path.exists(model_save_path):
+        print(f"\n  [finetune] 기존 모델에서 추가학습: {model_save_path}")
         print(f"  학습률: {lr} (기존 지식 보존을 위해 낮게 설정)")
-        tokenizer   = AutoTokenizer.from_pretrained(MODEL_SAVE_PATH)
+        tokenizer   = AutoTokenizer.from_pretrained(model_save_path)
         model       = AutoModelForSequenceClassification.from_pretrained(
-            MODEL_SAVE_PATH, num_labels=NUM_LABELS
+            model_save_path, num_labels=NUM_LABELS
         )
         start_epoch = 0
     else:
         if not args.scratch:
-            print(f"\n  저장된 모델 없음 → base KoBERT에서 새로 학습")
+            print(f"\n  저장된 모델 없음 -> base KoBERT에서 새로 학습")
         else:
             print(f"\n  [scratch] base KoBERT에서 새로 학습: {BASE_MODEL}")
         print(f"  학습률: {lr}")
@@ -319,20 +333,22 @@ def train():
     model.to(device)
 
     # GPU면 num_workers 늘려서 데이터 로딩 병렬화
-    num_workers = 4 if device.type == "cuda" else 0
+    num_workers = args.num_workers if args.num_workers is not None else (4 if device.type == "cuda" else 0)
+    pin_memory = device.type == "cuda"
+    persistent_workers = num_workers > 0
 
     generator = torch.Generator()
     generator.manual_seed(SEED)
 
-    train_dataset = AdDataset(train_df["text"], train_df["label"], tokenizer, MAX_LEN)
-    val_dataset   = AdDataset(val_df["text"],   val_df["label"],   tokenizer, MAX_LEN)
+    train_dataset = AdDataset(train_df["text"], train_df["label"], tokenizer, max_len)
+    val_dataset   = AdDataset(val_df["text"],   val_df["label"],   tokenizer, max_len)
     train_loader  = DataLoader(
-        train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers,
-        generator=generator
+        train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers,
+        generator=generator, pin_memory=pin_memory, persistent_workers=persistent_workers
     )
     val_loader    = DataLoader(
-        val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers,
-        generator=generator
+        val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+        generator=generator, pin_memory=pin_memory, persistent_workers=persistent_workers
     )
 
     # Optimizer & Scheduler
@@ -354,7 +370,8 @@ def train():
         scheduler.load_state_dict(state["scheduler_state_dict"])
 
     steps_per_epoch = len(train_loader)
-    print(f"\n  배치 크기: {BATCH_SIZE} / 에폭당 스텝: {steps_per_epoch}")
+    print(f"\n  배치 크기: {batch_size} / 에폭당 스텝: {steps_per_epoch}")
+    print(f"  num_workers: {num_workers} / pin_memory: {pin_memory}")
     print(f"  남은 에폭: {epochs - start_epoch}개")
     if device.type == "cuda":
         print(f"  GPU 학습 예상 시간: 에폭당 약 1~3분 (총 {(epochs - start_epoch) * 3}분 이내)")
@@ -445,14 +462,15 @@ def train():
     # Post-training evaluation (same fixed split, saved to reports/)
     if not args.no_eval:
         try:
+            from eval import evaluate_and_save
             print("\n  모델 저장 후 고정 검증셋 평가 중...")
             _, metrics_path = evaluate_and_save(
                 model_dir=MODEL_SAVE_PATH,
                 data=args.data,
                 seed=SEED,
                 test_size=0.2,
-                batch_size=BATCH_SIZE,
-                max_len=MAX_LEN,
+                batch_size=batch_size,
+                max_len=max_len,
                 output=None,
                 quiet=False,
             )
