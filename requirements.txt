@@ -14,6 +14,8 @@ kss==4.5.4
 
 # OCR
 easyocr>=1.7.1
+paddleocr>=3.5.0
+paddlepaddle>=3.2.0
 
 # KoBERT / 모델 학습
 # 기본 설치만으로 CPU 환경에서 서버/테스트가 바로 동작하도록 고정 버전 제공

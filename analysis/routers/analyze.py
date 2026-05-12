@@ -4,6 +4,7 @@ from analysis.services.extractor import extract_from_url, extract_from_image, sp
 from analysis.services.rule_engine import analyze_sentence, calculate_overall_score, should_run_kobert
 from analysis.services.ad_domain_filter import predict_ad, predict_cosmetic, is_noise
 from analysis.services.ai_analyzer import analyze_with_kobert, generate_summary
+from analysis.services.rule_domain import has_image_cosmetic_context
 import os
 import logging
 
@@ -27,7 +28,7 @@ async def analyze_text(request: AnalyzeRequest):
     else:
         text = request.content
 
-    return await _run_analysis(text)
+    return await _run_analysis(text, source_type="text")
 
 
 @router.post("/image", response_model=AnalyzeResponse)
@@ -45,10 +46,10 @@ async def analyze_image(file: UploadFile = File(...)):
     if not text.strip():
         raise HTTPException(status_code=422, detail="이미지에서 텍스트를 인식하지 못했습니다.")
 
-    return await _run_analysis(text)
+    return await _run_analysis(text, source_type="image")
 
 
-async def _run_analysis(text: str) -> AnalyzeResponse:
+async def _run_analysis(text: str, *, source_type: str = "text") -> AnalyzeResponse:
     """공통 분석 파이프라인"""
     sentences = split_sentences(text)
 
@@ -63,7 +64,13 @@ async def _run_analysis(text: str) -> AnalyzeResponse:
 
     # 1차 전단 필터 + 룰엔진
     rule_results = []
-    for s in sentences:
+    cosmetic_predictions = [predict_cosmetic(s) for s in sentences]
+    image_has_cosmetic_context = (
+        source_type == "image"
+        and has_image_cosmetic_context(sentences, cosmetic_predictions)
+    )
+
+    for idx, s in enumerate(sentences):
         # 0차: 잡음 컷
         if is_noise(s):
             logger.debug(
@@ -89,8 +96,8 @@ async def _run_analysis(text: str) -> AnalyzeResponse:
             )
             continue
 
-        cosmetic_pred = predict_cosmetic(s)
-        force_cosmetic = False if cosmetic_pred is None else cosmetic_pred[0]
+        cosmetic_pred = cosmetic_predictions[idx]
+        force_cosmetic = image_has_cosmetic_context or (False if cosmetic_pred is None else cosmetic_pred[0])
         cos_score = None if cosmetic_pred is None else round(cosmetic_pred[1], 3)
 
         # 광고 여부 예측은 참고 신호로만 사용한다.
@@ -112,7 +119,13 @@ async def _run_analysis(text: str) -> AnalyzeResponse:
             },
         )
 
-        rule_results.append(analyze_sentence(s, force_cosmetic=force_cosmetic))
+        rule_results.append(
+            analyze_sentence(
+                s,
+                force_cosmetic=force_cosmetic,
+                source_type=source_type,
+            )
+        )
 
     # 2차 KoBERT 분석 (설정에 따라)
     if USE_KOBERT:

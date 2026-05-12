@@ -1,11 +1,11 @@
-import asyncio
+﻿import asyncio
 
 import pytest
 
 from analysis.models.schemas import SuspicionLevel
 from analysis.services.ad_domain_filter import predict_ad, predict_cosmetic
 from analysis.services.ai_analyzer import analyze_with_kobert, _resolve_kobert_level
-from analysis.services.rule_engine import analyze_sentence, should_run_kobert
+from analysis.services.rule_engine import analyze_sentence, should_run_kobert, UNCERTAIN_DOMAIN_REASON
 
 
 CASES = [
@@ -31,7 +31,7 @@ CASES = [
     ),
     (
         "줄기세포 기술로 피부를 재생시키는 앰플입니다.",
-        SuspicionLevel.CAUTION,
+        SuspicionLevel.SUSPICIOUS,
     ),
     (
         "피부 각질 100프로 제거",
@@ -99,12 +99,13 @@ def test_ad_filter_identifies_obvious_ad_sentence():
     assert ad_pred[0] is True
 
 
-def test_stem_cell_regeneration_keeps_minimum_caution():
+def test_stem_cell_regeneration_is_escalated_with_strong_context():
     text = "줄기세포 기술로 피부를 재생시키는 앰플입니다."
     rule, final = asyncio.run(_run_pipeline(text))
     assert "첨단기술오인" in rule.matched_patterns
-    assert final.suspicion_level == SuspicionLevel.CAUTION
-    assert final.score >= 0.35
+    assert "고위험기능성오인" in rule.matched_patterns
+    assert final.suspicion_level == SuspicionLevel.SUSPICIOUS
+    assert final.score >= 0.45
 
 
 def test_benign_lasting_makeup_phrase_stays_normal():
@@ -155,6 +156,21 @@ def test_non_domain_sentence_skips_kobert():
     rule = analyze_sentence(text, force_cosmetic=False)
     assert rule.suspicion_level == SuspicionLevel.NORMAL
     assert should_run_kobert(rule) is False
+
+
+def test_uncertain_domain_ad_copy_is_forwarded_to_kobert():
+    text = "급이 다른 98% 마데카소사이드"
+    rule = analyze_sentence(text, force_cosmetic=False)
+    assert rule.suspicion_level == SuspicionLevel.NORMAL
+    assert rule.reason == UNCERTAIN_DOMAIN_REASON
+    assert should_run_kobert(rule) is True
+
+
+def test_short_uncertain_sales_copy_is_not_short_circuited_before_kobert():
+    text = "누적판매 40만병"
+    rule, final = asyncio.run(_run_pipeline(text))
+    assert rule.reason == UNCERTAIN_DOMAIN_REASON
+    assert final.reason != "아주 짧은 일반 문구는 과탐지를 막기 위해 정상으로 처리했습니다."
 
 
 def test_non_domain_filter_does_not_hide_forbidden_claim():
@@ -335,6 +351,54 @@ def test_allowed_acne_prone_skin_phrase_stays_normal():
     assert final.suspicion_level == SuspicionLevel.NORMAL
 
 
+def test_allowed_acne_prone_skin_variant_stays_normal():
+    text = "피부과학 기반 여드름성 피부에 사용에 적합"
+    rule, final = asyncio.run(_run_pipeline(text))
+    assert rule.suspicion_level == SuspicionLevel.NORMAL
+    assert final.suspicion_level == SuspicionLevel.NORMAL
+
+
+def test_allowed_hair_fall_reduction_wrapper_stays_normal():
+    text = "피부를 촉촉하게 가꾸어주는 빠지는 모발 감소에 도움 제품."
+    rule, final = asyncio.run(_run_pipeline(text))
+    assert rule.suspicion_level == SuspicionLevel.NORMAL
+    assert final.suspicion_level == SuspicionLevel.NORMAL
+
+
+def test_ingredient_style_short_copy_is_deferred_for_extra_check():
+    text = "올리브 영양 함유!"
+    rule = analyze_sentence(text, force_cosmetic=False)
+    assert rule.reason == UNCERTAIN_DOMAIN_REASON
+
+
+def test_regulatory_ingredient_phrase_stays_normal():
+    text = "식약처 허가 원료 함유"
+    rule, final = asyncio.run(_run_pipeline(text))
+    assert rule.suspicion_level == SuspicionLevel.NORMAL
+    assert final.suspicion_level == SuspicionLevel.NORMAL
+
+
+def test_regulatory_functional_product_phrase_stays_normal():
+    text = "주름 개선 기능성 화장품으로 허가받은 제품입니다."
+    rule, final = asyncio.run(_run_pipeline(text))
+    assert rule.suspicion_level == SuspicionLevel.NORMAL
+    assert final.suspicion_level == SuspicionLevel.NORMAL
+
+
+def test_wrinkle_help_variants_stay_normal():
+    for text in [
+        "식약처 허가 기능성 화장품 (주름 개선에 도움)입니다.",
+        "아데노신 성분이 주름 개선에 도움을 줍니다.",
+        "하루 종일 지속되는 식약처 허가 기능성 화장품 (주름 개선에 도움) 효과.",
+        "가볍고 산뜻하게 식약처 허가 기능성 화장품 (주름 개선에 도움)을 도와주는 크림.",
+        "피부과학 기반 우유 엑소좀, 식물 엑소좀 등",
+        "피부과학 기반 화장품 허위·과대 광고의 근원적 문제를 해결하기 위해 최선을 다하겠다",
+    ]:
+        rule, final = asyncio.run(_run_pipeline(text))
+        assert rule.suspicion_level == SuspicionLevel.NORMAL
+        assert final.suspicion_level == SuspicionLevel.NORMAL
+
+
 def test_hair_loss_prevention_variant_is_not_missed():
     text = "풍성한 거품 모발강화 & 탈모방지 효과 샴푸!"
     rule, final = asyncio.run(_run_pipeline(text))
@@ -401,7 +465,8 @@ def test_hair_growth_metric_claim_is_not_missed():
 def test_detox_claim_is_not_treated_as_normal():
     text = "피부 독소 제거(디톡스)"
     rule, final = asyncio.run(_run_pipeline(text))
-    assert final.suspicion_level in {SuspicionLevel.CAUTION, SuspicionLevel.SUSPICIOUS}
+    assert rule.suspicion_level == SuspicionLevel.SUSPICIOUS
+    assert final.suspicion_level == SuspicionLevel.SUSPICIOUS
 
 
 def test_botox_claim_is_not_treated_as_normal():
@@ -478,7 +543,116 @@ def test_endocrine_action_claim_is_not_non_domain():
     text = "호르몬 분비촉진 등 내분비 작용"
     rule, final = asyncio.run(_run_pipeline(text))
     assert "관련 없는 문구" not in rule.reason
-    assert final.suspicion_level in {SuspicionLevel.CAUTION, SuspicionLevel.SUSPICIOUS}
+    assert rule.suspicion_level == SuspicionLevel.CAUTION
+    assert final.suspicion_level == SuspicionLevel.CAUTION
+
+
+def test_hair_thickness_growth_claim_is_caution():
+    text = "모발 두께 증가"
+    rule, final = asyncio.run(_run_pipeline(text))
+    assert rule.suspicion_level == SuspicionLevel.CAUTION
+    assert final.suspicion_level == SuspicionLevel.CAUTION
+
+
+def test_regeneration_claim_without_strong_context_is_now_escalated():
+    text = "피부재생"
+    rule, final = asyncio.run(_run_pipeline(text))
+    assert rule.suspicion_level == SuspicionLevel.SUSPICIOUS
+    assert final.suspicion_level == SuspicionLevel.SUSPICIOUS
+
+
+def test_stem_cell_regeneration_with_strong_context_is_escalated():
+    text = "피부세포를 재생시키는 인체 줄기세포의 마법"
+    rule, final = asyncio.run(_run_pipeline(text))
+    assert rule.suspicion_level == SuspicionLevel.SUSPICIOUS
+    assert final.suspicion_level == SuspicionLevel.SUSPICIOUS
+
+
+def test_boundary_functional_claims_follow_latest_policy():
+    caution_cases = [
+        "유익균 균형 보호",
+        "피부결 20% 개선",
+        "피부 면역력 향상",
+        "피부 손상 회복",
+        "피부 손상 복구",
+        "호르몬 분비촉진 등 내분비 작용",
+        "세포 활력(증가)",
+    ]
+    suspicious_cases = [
+        "질내 산도 유지",
+        "땀 억제",
+        "셀룰라이트 감소",
+    ]
+    for text in caution_cases:
+        rule, final = asyncio.run(_run_pipeline(text))
+        assert rule.suspicion_level == SuspicionLevel.CAUTION
+        assert final.suspicion_level == SuspicionLevel.CAUTION
+    for text in suspicious_cases:
+        rule, final = asyncio.run(_run_pipeline(text))
+        assert rule.suspicion_level == SuspicionLevel.SUSPICIOUS
+        assert final.suspicion_level == SuspicionLevel.SUSPICIOUS
+
+
+def test_spacing_variants_of_high_risk_claims_are_escalated():
+    for text in [
+        "세포 성장을 촉진",
+        "체형변화",
+        "얼굴 크기가 작아진다",
+        "속눈썹, 눈썹이 자람",
+        "체내 노폐물 제거",
+    ]:
+        rule, final = asyncio.run(_run_pipeline(text))
+        assert rule.suspicion_level == SuspicionLevel.SUSPICIOUS
+        assert final.suspicion_level == SuspicionLevel.SUSPICIOUS
+
+
+def test_spacing_variants_of_boundary_claims_remain_caution():
+    caution_cases = [
+        "유익균의 균형 보호",
+        "모발굵기 증가",
+        "가는 모발 굵기 증가",
+        "모발의 두께를 증가",
+    ]
+    suspicious_cases = [
+        "땀 발생을 억제",
+    ]
+    for text in caution_cases:
+        rule, final = asyncio.run(_run_pipeline(text))
+        assert rule.suspicion_level == SuspicionLevel.CAUTION
+        assert final.suspicion_level == SuspicionLevel.CAUTION
+    for text in suspicious_cases:
+        rule, final = asyncio.run(_run_pipeline(text))
+        assert rule.suspicion_level == SuspicionLevel.SUSPICIOUS
+        assert final.suspicion_level == SuspicionLevel.SUSPICIOUS
+
+
+def test_clear_risky_normal_misses_are_escalated_or_flagged():
+    expectations = {
+        "모발 등의 성장을 촉진 또는 억제": SuspicionLevel.SUSPICIOUS,
+        "주름이 채워지고 속눈썹이 자라는 역주행 대란템": SuspicionLevel.SUSPICIOUS,
+        "모발생장촉진": SuspicionLevel.SUSPICIOUS,
+        "지방볼륨생성": SuspicionLevel.SUSPICIOUS,
+        "통증 경감": SuspicionLevel.SUSPICIOUS,
+        "얼굴 윤곽개선, V라인": SuspicionLevel.SUSPICIOUS,
+        "기능성 화장품 심사·보고하지 않은 제품에서 “식약처 미백 고시 성분 OO 함유” 표현": SuspicionLevel.SUSPICIOUS,
+        "일시적 악화(명현 현상)이 있을 수 있다": SuspicionLevel.SUSPICIOUS,
+        "상처로 인한 반흔을 제거 또는 완화한다": SuspicionLevel.SUSPICIOUS,
+        "피부 나이 n 감소 또는 어려진다는 표현": SuspicionLevel.SUSPICIOUS,
+        "미세먼지 차단, 미세먼지 흡착 방지": SuspicionLevel.CAUTION,
+        "피부노화 완화, 안티에이징, 피부노화 징후 감소, 피부노화지수 감소": SuspicionLevel.CAUTION,
+        "여성크림, 성 윤활작용": SuspicionLevel.SUSPICIOUS,
+        "쾌감을 증대": SuspicionLevel.SUSPICIOUS,
+        "질 보습, 질 수축 작용": SuspicionLevel.SUSPICIOUS,
+        "콜라겐 증가, 감소 또는 활성화": SuspicionLevel.CAUTION,
+        "효소 증가, 감소 또는 활성화": SuspicionLevel.CAUTION,
+        "피부구성 물질(예 : 효소, 콜라겐 등)을 증가, 감소 또는 활성화시킨다": SuspicionLevel.CAUTION,
+        "기능성 화장품 심사(보고)하지 아니한 제품에 미백, 화이트닝(whitening), 주름(링클, wrinkle) 개선, 자외선(UV)차단 등 기능성 관련 표현": SuspicionLevel.SUSPICIOUS,
+        "기능성화장품으로 심사(보고)하지 아니한 제품에 ‘식약처 미백 고시 성분 OO 함유’ 등의 표현": SuspicionLevel.SUSPICIOUS,
+    }
+    for text, expected in expectations.items():
+        rule, final = asyncio.run(_run_pipeline(text))
+        assert rule.suspicion_level == expected
+        assert final.suspicion_level == expected
 
 
 def test_trace_removal_claim_is_not_non_domain():
@@ -535,3 +709,4 @@ def test_kobert_downgrades_rule_suspicious_when_score_is_moderate():
     rule = analyze_sentence("이 크림은 아토피를 치료합니다.", force_cosmetic=True)
     assert rule.suspicion_level == SuspicionLevel.SUSPICIOUS
     assert _resolve_kobert_level(rule, 0.52) == SuspicionLevel.CAUTION
+

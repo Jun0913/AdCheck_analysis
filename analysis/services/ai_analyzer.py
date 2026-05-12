@@ -13,6 +13,16 @@ import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from analysis.models.schemas import SentenceResult, SuspicionLevel
 from analysis.services.nli_verifier import verify_with_nli
+from analysis.services.rule_engine import (
+    EXTRA_ALLOW_NORMAL_REASON,
+    STRICT_ALLOW_NORMAL_REASON,
+    UNCERTAIN_DOMAIN_REASON,
+)
+from analysis.services.rule_patterns import (
+    CAUTION_ONLY_PATTERNS,
+    MIN_PATTERN_LEVELS,
+    STRONG_SUSPICIOUS_PATTERNS,
+)
 
 # ────────────────────────────────────────────
 # 라벨 매핑: 학습 시 정의한 순서와 반드시 일치해야 함
@@ -30,53 +40,35 @@ _LEVEL_ORDER = {
     SuspicionLevel.SUSPICIOUS: 2,
 }
 
-MIN_PATTERN_LEVELS: dict[str, SuspicionLevel] = {
-    "강력금지": SuspicionLevel.SUSPICIOUS,
-    "의약품오인": SuspicionLevel.SUSPICIOUS,
-    "효능과장": SuspicionLevel.SUSPICIOUS,
-    "안전성단정": SuspicionLevel.SUSPICIOUS,
-    "추천보증": SuspicionLevel.SUSPICIOUS,
-    "검증오인": SuspicionLevel.SUSPICIOUS,
-    "기능성오인": SuspicionLevel.CAUTION,
-    "고위험기능성오인": SuspicionLevel.SUSPICIOUS,
-    "첨단기술오인": SuspicionLevel.CAUTION,
-    "비교우위": SuspicionLevel.CAUTION,
-    "주의예외": SuspicionLevel.CAUTION,
-}
-
-# 패턴 태그 → 한국어 설명 (rule_engine과 동일하게 유지)
-_PATTERN_DESC: dict[str, str] = {
-    "의약품오인":  "의약품으로 오인될 수 있는 표현",
-    "효능과장":   "효능을 과장하거나 절대적으로 단정하는 표현",
-    "기능성오인":  "기능성 화장품 심사 없이 기능성을 주장하는 표현",
-    "안전성단정":  "안전성을 근거 없이 단정하는 표현",
-    "추천보증":   "전문가 추천·인증을 주장하는 표현",
-    "검증오인":   "임상·시험 결과를 효능 보장처럼 단정하는 표현",
-    "비교우위":   "근거 없이 타사 대비 우위를 주장하는 표현",
-    "고위험기능성오인": "기능성 범위를 넘어 신체 변화·의약품 효능처럼 보이는 고위험 표현",
-    "주의예외": "허용 가능성이 있으나 주의 단계로 유지해야 하는 표현",
-}
-
-CAUTION_ONLY_PATTERNS = {"기능성오인", "첨단기술오인", "비교우위", "주의예외"}
-
 
 def _resolve_kobert_level(rule_result: SentenceResult, weighted_score: float) -> SuspicionLevel:
-    """룰 결과와 KoBERT 가중 점수를 조합해 최종 레벨을 결정한다."""
-    if rule_result.suspicion_level == SuspicionLevel.SUSPICIOUS:
-        if weighted_score >= 0.55:
-            return SuspicionLevel.SUSPICIOUS
-        return SuspicionLevel.CAUTION
-
-    if rule_result.suspicion_level == SuspicionLevel.CAUTION:
-        if weighted_score >= 0.60:
-            return SuspicionLevel.SUSPICIOUS
-        if weighted_score >= 0.30:
-            return SuspicionLevel.CAUTION
-        return SuspicionLevel.NORMAL
-
-    if weighted_score >= 0.80:
+    """KoBERT 점수를 우선하되, 명백한 의심 패턴만 정책상 최소 레벨을 유지한다."""
+    if weighted_score >= 0.75:
         return SuspicionLevel.SUSPICIOUS
-    if weighted_score >= 0.55:
+    if (
+        rule_result.suspicion_level == SuspicionLevel.CAUTION
+        and len(rule_result.matched_patterns) >= 2
+        and weighted_score >= 0.40
+    ):
+        return SuspicionLevel.SUSPICIOUS
+    if weighted_score >= 0.50:
+        return SuspicionLevel.CAUTION
+    if (
+        rule_result.suspicion_level == SuspicionLevel.CAUTION
+        and rule_result.score >= 0.35
+        and weighted_score >= 0.05
+    ):
+        return SuspicionLevel.CAUTION
+    if (
+        rule_result.suspicion_level == SuspicionLevel.CAUTION
+        and weighted_score >= 0.20
+    ):
+        return SuspicionLevel.CAUTION
+    if (
+        rule_result.suspicion_level == SuspicionLevel.SUSPICIOUS
+        and set(rule_result.matched_patterns).intersection(STRONG_SUSPICIOUS_PATTERNS)
+        and weighted_score >= 0.18
+    ):
         return SuspicionLevel.CAUTION
     return SuspicionLevel.NORMAL
 
@@ -85,19 +77,19 @@ def _build_kobert_reason(level: SuspicionLevel, rule_result: SentenceResult, wei
     keywords = rule_result.matched_keywords
 
     if level == SuspicionLevel.NORMAL:
-        return "일반적인 광고 표현으로 분류되었습니다."
+        if rule_result.reason == UNCERTAIN_DOMAIN_REASON:
+            return "짧은 광고 문구로 보이지만, 현재 기준에서는 문제 표현이 확인되지 않았습니다."
+        return "현재 기준에서는 문제 표현이 확인되지 않았습니다."
 
     if keywords:
         kw_display = ", ".join(f"'{kw}'" for kw in keywords[:2])
         if level == SuspicionLevel.SUSPICIOUS:
             return (
-                f"AI 분석 결과 {kw_display} 등의 표현이 문장 전체 맥락에서 "
-                f"소비자를 오인하게 할 가능성이 높은 허위·과장 표현으로 판단됩니다."
+                f"{kw_display} 같은 표현이 문장 전체 맥락에서 과장되거나 오해를 부를 가능성이 높습니다."
             )
         else:
             return (
-                f"AI 분석 결과 {kw_display} 등의 표현이 문장 전체 맥락에서 "
-                f"과장 가능성이 있는 표현으로 판단됩니다."
+                f"{kw_display} 같은 표현이 문장 전체 맥락에서 다소 과장되게 받아들여질 수 있습니다."
             )
 
     # 키워드 없이 KoBERT만으로 잡힌 경우 — 문장에서 핵심 어절 추출
@@ -105,13 +97,11 @@ def _build_kobert_reason(level: SuspicionLevel, rule_result: SentenceResult, wei
     sample = ", ".join(f"'{w}'" for w in words[:3]) if words else "해당 문구"
     if level == SuspicionLevel.SUSPICIOUS:
         return (
-            f"AI 모델이 문장 전체 맥락을 분석한 결과 {sample} 등의 표현 방식이 "
-            f"소비자를 오인하게 할 수 있는 허위·과장 표현으로 판단됩니다."
+            f"{sample} 같은 표현 방식이 문장 전체 맥락에서 과장되거나 오해를 부를 가능성이 높습니다."
         )
     else:
         return (
-            f"AI 모델이 문장 전체 맥락을 분석한 결과 {sample} 등의 표현 방식이 "
-            f"과장 가능성이 있어 주의가 필요합니다."
+            f"{sample} 같은 표현 방식이 다소 과장되게 받아들여질 수 있습니다."
         )
 
 
@@ -122,13 +112,22 @@ def _enforce_minimum_pattern_level(result: SentenceResult) -> SentenceResult:
         if _LEVEL_ORDER[pattern_level] > _LEVEL_ORDER[minimum_level]:
             minimum_level = pattern_level
 
-    if _LEVEL_ORDER[result.suspicion_level] >= _LEVEL_ORDER[minimum_level]:
-        return result
-
     minimum_score = {
         SuspicionLevel.CAUTION: 0.35,
         SuspicionLevel.SUSPICIOUS: 0.70,
     }.get(minimum_level, result.score)
+    if _LEVEL_ORDER[result.suspicion_level] >= _LEVEL_ORDER[minimum_level]:
+        if result.score >= minimum_score:
+            return result
+        return SentenceResult(
+            sentence=result.sentence,
+            suspicion_level=result.suspicion_level,
+            matched_keywords=result.matched_keywords,
+            matched_patterns=result.matched_patterns,
+            reason=result.reason,
+            score=minimum_score,
+        )
+
     adjusted_reason = result.reason
     if "정책상 최소" not in adjusted_reason:
         adjusted_reason = f"{adjusted_reason} 정책상 최소 {minimum_level.value} 단계를 유지합니다."
@@ -146,7 +145,10 @@ MODEL_PATH = os.getenv("KOBERT_MODEL_PATH", "models/kobert_ad_classifier")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _tokenizer = None
 _model = None
-WHITELIST_NORMAL_REASON = "허용된 표현 중심의 문구로 판단됩니다."
+ALLOWLIST_NORMAL_REASONS = {
+    STRICT_ALLOW_NORMAL_REASON,
+    EXTRA_ALLOW_NORMAL_REASON,
+}
 
 
 def _load_model():
@@ -183,14 +185,18 @@ async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> Sen
         # callers do not accidentally let KoBERT override obvious allowlisted text.
         if (
             rule_result.suspicion_level == SuspicionLevel.NORMAL
-            and rule_result.reason == WHITELIST_NORMAL_REASON
+            and rule_result.reason in ALLOWLIST_NORMAL_REASONS
             and not rule_result.matched_patterns
         ):
             return rule_result
 
         # ── 짧은 문장 과탐지 방지 ─────────────────────────────
         # 인사말/단어 수준(글자수<6 또는 단어≤2)이며 규칙 패턴이 없으면 바로 정상 처리
-        if (len(sentence.strip()) < 6 or len(sentence.split()) <= 2) and not rule_result.matched_patterns:
+        if (
+            (len(sentence.strip()) < 6 or len(sentence.split()) <= 2)
+            and not rule_result.matched_patterns
+            and rule_result.reason != UNCERTAIN_DOMAIN_REASON
+        ):
             return SentenceResult(
                 sentence=sentence,
                 suspicion_level=SuspicionLevel.NORMAL,
@@ -233,13 +239,6 @@ async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> Sen
         kobert_level = _resolve_kobert_level(rule_result, weighted_score)
 
         if (
-            rule_result.suspicion_level == SuspicionLevel.CAUTION
-            and rule_result.matched_keywords
-            and kobert_level == SuspicionLevel.NORMAL
-        ):
-            kobert_level = SuspicionLevel.CAUTION
-
-        if (
             kobert_level == SuspicionLevel.SUSPICIOUS
             and rule_result.matched_patterns
             and set(rule_result.matched_patterns).issubset(CAUTION_ONLY_PATTERNS)
@@ -271,7 +270,8 @@ async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> Sen
         # 조건: 규칙 엔진이 패턴을 감지했고 KoBERT 점수가 회색지대(0.35~0.65)이거나
         #       규칙 엔진·KoBERT 결과가 엇갈릴 때
         should_call_nli = bool(rule_result.matched_patterns) and (
-            0.35 <= weighted_score <= 0.65
+            (len(rule_result.matched_patterns) >= 2 and weighted_score >= 0.20)
+            or 0.35 <= weighted_score <= 0.65
             or rule_result.suspicion_level != kobert_level
         )
         if should_call_nli:

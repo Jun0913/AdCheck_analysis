@@ -1,9 +1,14 @@
 import httpx
 from bs4 import BeautifulSoup
+import os
 import re
+import tempfile
 from urllib.parse import urlparse
 import numpy as np
 import cv2
+
+os.environ.setdefault("PADDLE_PDX_CACHE_HOME", r"C:\Users\jhjh1\.codex\memories\paddlex_cache")
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 try:
     import easyocr
@@ -11,9 +16,24 @@ try:
 except ImportError:
     _EASYOCR_AVAILABLE = False
 
+try:
+    from paddleocr import PaddleOCR
+    _PADDLEOCR_AVAILABLE = True
+except ImportError:
+    _PADDLEOCR_AVAILABLE = False
+
 _easy_reader = None
+_paddle_reader = None
 OCR_PRIMARY_MIN_SCORE = 0.45
 OCR_PRIMARY_MIN_TEXT_LEN = 12
+OCR_ENGINE = os.getenv("OCR_ENGINE", "easy").strip().lower()
+OCR_MAX_SIDE = int(os.getenv("OCR_MAX_SIDE", "2200"))
+OCR_ROW_MAX_SIDE = int(os.getenv("OCR_ROW_MAX_SIDE", "1800"))
+OCR_PRIMARY_VARIANT_LIMIT = max(1, int(os.getenv("OCR_PRIMARY_VARIANT_LIMIT", "4")))
+OCR_FALLBACK_VARIANT_LIMIT = max(1, int(os.getenv("OCR_FALLBACK_VARIANT_LIMIT", "2")))
+OCR_ROW_CROP_MIN_SCORE = float(os.getenv("OCR_ROW_CROP_MIN_SCORE", "0.38"))
+OCR_EARLY_EXIT_SCORE = float(os.getenv("OCR_EARLY_EXIT_SCORE", "0.72"))
+OCR_EARLY_EXIT_TEXT_LEN = int(os.getenv("OCR_EARLY_EXIT_TEXT_LEN", "24"))
 OCR_CORRECTIONS = {
     "피부릍": "피부를",
     "피부륻": "피부를",
@@ -57,6 +77,18 @@ def _get_easy_reader():
             use_gpu = False
         _easy_reader = easyocr.Reader(["ko", "en"], gpu=use_gpu)
     return _easy_reader
+
+
+def _get_paddle_reader():
+    global _paddle_reader
+    if _paddle_reader is None:
+        _paddle_reader = PaddleOCR(
+            lang="korean",
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        )
+    return _paddle_reader
 
 
 def _normalize_ocr_text(text: str) -> str:
@@ -105,6 +137,21 @@ def _decode_image(image_bytes: bytes):
     return cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
 
+def _resize_to_max_side(image, max_side: int):
+    if image is None or max_side <= 0:
+        return image
+    h, w = image.shape[:2]
+    longest = max(h, w)
+    if longest <= max_side:
+        return image
+    scale = max_side / float(longest)
+    return cv2.resize(
+        image,
+        (max(1, int(w * scale)), max(1, int(h * scale))),
+        interpolation=cv2.INTER_AREA,
+    )
+
+
 def _encode_png(image) -> bytes:
     ok, buf = cv2.imencode(".png", image)
     return buf.tobytes() if ok else b""
@@ -119,9 +166,10 @@ def _extract_text_rows(image_bytes: bytes) -> list[bytes]:
         img = _decode_image(image_bytes)
         if img is None:
             return rows
+        img = _resize_to_max_side(img, OCR_ROW_MAX_SIDE)
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        if min(gray.shape[:2]) < 800:
+        if min(gray.shape[:2]) < 700:
             scale = min(2.2, 800 / max(1, min(gray.shape[:2])))
             gray = cv2.resize(
                 gray,
@@ -181,12 +229,13 @@ def _build_ocr_variants(image_bytes: bytes) -> list[tuple[str, bytes]]:
         img = _decode_image(image_bytes)
         if img is None:
             return variants
+        img = _resize_to_max_side(img, OCR_MAX_SIDE)
 
         h, w = img.shape[:2]
         min_side = min(h, w)
         scale = 1.0
-        if min_side < 800:
-            scale = min(2.5, 800 / max(1, min_side))
+        if min_side < 700:
+            scale = min(2.0, 700 / max(1, min_side))
             img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -215,7 +264,7 @@ def _build_ocr_variants(image_bytes: bytes) -> list[tuple[str, bytes]]:
         variants.append(("otsu_threshold_inverted", _encode_png(otsu_inv)))
 
         # Small, low-contrast ad text benefits from stronger enlargement.
-        super_res = cv2.resize(gray, None, fx=2.8, fy=2.8, interpolation=cv2.INTER_CUBIC)
+        super_res = cv2.resize(gray, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
         super_res = cv2.GaussianBlur(super_res, (0, 0), 0.6)
         super_res = cv2.addWeighted(super_res, 1.6, cv2.GaussianBlur(super_res, (0, 0), 2.0), -0.6, 0)
         variants.append(("super_res_sharpened", _encode_png(super_res)))
@@ -223,6 +272,28 @@ def _build_ocr_variants(image_bytes: bytes) -> list[tuple[str, bytes]]:
         return variants
 
     return [(name, data) for name, data in variants if data]
+
+
+def _select_ocr_variants(variants: list[tuple[str, bytes]], limit: int) -> list[tuple[str, bytes]]:
+    preferred_order = {
+        "original": 0,
+        "grayscale_clahe": 1,
+        "sharpened": 2,
+        "super_res_sharpened": 3,
+        "adaptive_threshold": 4,
+        "otsu_threshold": 5,
+        "adaptive_threshold_inverted": 6,
+        "otsu_threshold_inverted": 7,
+    }
+    ordered = sorted(variants, key=lambda item: preferred_order.get(item[0], 99))
+    return ordered[: max(1, limit)]
+
+
+def _is_strong_ocr_candidate(candidate: dict) -> bool:
+    return (
+        candidate.get("score", 0.0) >= OCR_EARLY_EXIT_SCORE
+        and len(candidate.get("text", "")) >= OCR_EARLY_EXIT_TEXT_LEN
+    )
 
 
 def _run_easyocr_once(
@@ -262,6 +333,62 @@ def _run_easyocr_once(
     }
 
 
+def _run_paddleocr_once(image_bytes: bytes, *, min_confidence: float) -> dict:
+    reader = _get_paddle_reader()
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp.write(image_bytes)
+        tmp_path = tmp.name
+
+    try:
+        result = reader.predict(tmp_path)
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    if not result:
+        return {"text": "", "score": 0.0, "confidences": [], "raw_count": 0}
+
+    page = result[0] if isinstance(result, list) else result
+    texts = list(page.get("rec_texts") or [])
+    scores = [float(score) for score in (page.get("rec_scores") or [])]
+    dt_polys = list(page.get("dt_polys") or [])
+
+    rows = []
+    for idx, text in enumerate(texts):
+        score = scores[idx] if idx < len(scores) else 0.0
+        if score < min_confidence:
+            continue
+        poly = dt_polys[idx] if idx < len(dt_polys) else None
+        if poly is not None:
+            try:
+                poly_arr = np.asarray(poly)
+                y = int(np.min(poly_arr[:, 1]))
+                x = int(np.min(poly_arr[:, 0]))
+            except Exception:
+                y = idx
+                x = 0
+        else:
+            y = idx
+            x = 0
+        rows.append((y, x, str(text), score))
+
+    if not rows:
+        return {"text": "", "score": 0.0, "confidences": [], "raw_count": len(texts)}
+
+    rows.sort(key=lambda item: (item[0], item[1]))
+    lines = [item[2] for item in rows]
+    confidences = [item[3] for item in rows]
+    text = _normalize_ocr_text("\n".join(lines))
+    return {
+        "text": text,
+        "score": _ocr_quality_score(text, confidences),
+        "confidences": confidences,
+        "raw_count": len(texts),
+    }
+
+
 def _extract_with_easyocr_variants(image_bytes: bytes) -> str:
     variants = _build_ocr_variants(image_bytes)
     best = {"text": "", "score": 0.0}
@@ -273,23 +400,27 @@ def _extract_with_easyocr_variants(image_bytes: bytes) -> str:
         "min_confidence": 0.35,
         "mag_ratio": 1.7,
     }
-    for name, variant_bytes in variants:
+    primary_variants = _select_ocr_variants(variants, OCR_PRIMARY_VARIANT_LIMIT)
+    for name, variant_bytes in primary_variants:
         candidate = _run_easyocr_once(variant_bytes, **primary_settings)
         if candidate["score"] > best["score"]:
             best = {**candidate, "variant": name}
+        if _is_strong_ocr_candidate(best):
+            return best["text"]
 
-    row_texts = []
-    row_scores = []
-    for row_bytes in _extract_text_rows(image_bytes):
-        candidate = _run_easyocr_once(row_bytes, **primary_settings)
-        if candidate["text"]:
-            row_texts.append(candidate["text"])
-            row_scores.append(candidate["score"])
-    if row_texts:
-        row_joined = _normalize_ocr_text("\n".join(row_texts))
-        row_score = (sum(row_scores) / max(len(row_scores), 1)) + min(len(row_texts) / 20.0, 0.2)
-        if row_score > best["score"] and len(row_joined) >= len(best["text"]) * 0.7:
-            best = {"text": row_joined, "score": round(row_score, 4), "variant": "row_crops"}
+    if best["score"] < OCR_ROW_CROP_MIN_SCORE:
+        row_texts = []
+        row_scores = []
+        for row_bytes in _extract_text_rows(image_bytes):
+            candidate = _run_easyocr_once(row_bytes, **primary_settings)
+            if candidate["text"]:
+                row_texts.append(candidate["text"])
+                row_scores.append(candidate["score"])
+        if row_texts:
+            row_joined = _normalize_ocr_text("\n".join(row_texts))
+            row_score = (sum(row_scores) / max(len(row_scores), 1)) + min(len(row_texts) / 20.0, 0.2)
+            if row_score > best["score"] and len(row_joined) >= len(best["text"]) * 0.7:
+                best = {"text": row_joined, "score": round(row_score, 4), "variant": "row_crops"}
 
     if best["score"] >= OCR_PRIMARY_MIN_SCORE and len(best["text"]) >= OCR_PRIMARY_MIN_TEXT_LEN:
         return best["text"]
@@ -302,10 +433,55 @@ def _extract_with_easyocr_variants(image_bytes: bytes) -> str:
         "min_confidence": 0.22,
         "mag_ratio": 2.0,
     }
-    for name, variant_bytes in variants:
+    fallback_variants = _select_ocr_variants(variants, OCR_FALLBACK_VARIANT_LIMIT)
+    for name, variant_bytes in fallback_variants:
         candidate = _run_easyocr_once(variant_bytes, **fallback_settings)
         if candidate["score"] > best["score"]:
             best = {**candidate, "variant": name}
+        if _is_strong_ocr_candidate(best):
+            return best["text"]
+
+    return best["text"]
+
+
+def _extract_with_paddleocr_variants(image_bytes: bytes) -> str:
+    variants = _build_ocr_variants(image_bytes)
+    best = {"text": "", "score": 0.0}
+
+    primary_min_confidence = 0.45
+    primary_variants = _select_ocr_variants(variants, OCR_PRIMARY_VARIANT_LIMIT)
+    for name, variant_bytes in primary_variants:
+        candidate = _run_paddleocr_once(variant_bytes, min_confidence=primary_min_confidence)
+        if candidate["score"] > best["score"]:
+            best = {**candidate, "variant": name}
+        if _is_strong_ocr_candidate(best):
+            return best["text"]
+
+    if best["score"] >= OCR_PRIMARY_MIN_SCORE and len(best["text"]) >= OCR_PRIMARY_MIN_TEXT_LEN:
+        return best["text"]
+
+    if best["score"] < OCR_ROW_CROP_MIN_SCORE:
+        row_texts = []
+        row_scores = []
+        for row_bytes in _extract_text_rows(image_bytes):
+            candidate = _run_paddleocr_once(row_bytes, min_confidence=primary_min_confidence)
+            if candidate["text"]:
+                row_texts.append(candidate["text"])
+                row_scores.append(candidate["score"])
+        if row_texts:
+            row_joined = _normalize_ocr_text("\n".join(row_texts))
+            row_score = (sum(row_scores) / max(len(row_scores), 1)) + min(len(row_texts) / 20.0, 0.2)
+            if row_score > best["score"] and len(row_joined) >= len(best["text"]) * 0.7:
+                best = {"text": row_joined, "score": round(row_score, 4), "variant": "row_crops"}
+
+    fallback_min_confidence = 0.25
+    fallback_variants = _select_ocr_variants(variants, OCR_FALLBACK_VARIANT_LIMIT)
+    for name, variant_bytes in fallback_variants:
+        candidate = _run_paddleocr_once(variant_bytes, min_confidence=fallback_min_confidence)
+        if candidate["score"] > best["score"]:
+            best = {**candidate, "variant": name}
+        if _is_strong_ocr_candidate(best):
+            return best["text"]
 
     return best["text"]
 
@@ -538,12 +714,48 @@ def extract_from_image(image_bytes: bytes) -> str:
     - 1차 결과 품질이 낮으면 완화된 threshold로 fallback 재시도
     - 결과는 간단한 OCR 오타 교정을 거쳐 반환
     """
+    engine = OCR_ENGINE
+    if engine not in {"auto", "paddle", "easy"}:
+        engine = "auto"
+
+    if engine == "paddle":
+        if not _PADDLEOCR_AVAILABLE:
+            raise RuntimeError("PaddleOCR가 설치되어 있지 않습니다. pip install paddleocr 를 실행하세요.")
+        try:
+            return _extract_with_paddleocr_variants(image_bytes)
+        except Exception as e:
+            raise RuntimeError(f"PaddleOCR 텍스트 추출 실패: {e}")
+
+    if engine == "easy":
+        if not _EASYOCR_AVAILABLE:
+            raise RuntimeError("EasyOCR가 설치되어 있지 않습니다. pip install easyocr 를 실행하세요.")
+        try:
+            return _extract_with_easyocr_variants(image_bytes)
+        except Exception as e:
+            raise RuntimeError(f"EasyOCR 텍스트 추출 실패: {e}")
+
+    if _EASYOCR_AVAILABLE:
+        try:
+            text = _extract_with_easyocr_variants(image_bytes)
+            if len(text.strip()) >= OCR_PRIMARY_MIN_TEXT_LEN:
+                return text
+        except Exception:
+            pass
+
+    if _PADDLEOCR_AVAILABLE:
+        try:
+            text = _extract_with_paddleocr_variants(image_bytes)
+            if len(text.strip()) >= OCR_PRIMARY_MIN_TEXT_LEN:
+                return text
+        except Exception:
+            pass
+
     if not _EASYOCR_AVAILABLE:
-        raise RuntimeError("EasyOCR가 설치되어 있지 않습니다. pip install easyocr 를 실행하세요.")
+        raise RuntimeError("사용 가능한 OCR 엔진이 없습니다. paddleocr 또는 easyocr를 설치하세요.")
     try:
         return _extract_with_easyocr_variants(image_bytes)
     except Exception as e:
-        raise RuntimeError(f"이미지 텍스트 추출 실패: {e}")
+        raise RuntimeError(f"EasyOCR 텍스트 추출 실패: {e}")
 
 
 def split_sentences(text: str) -> list[str]:

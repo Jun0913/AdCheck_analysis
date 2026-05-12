@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from analysis.main import app
+from analysis.models.schemas import SuspicionLevel
 from analysis.routers import analyze as analyze_router
 
 
@@ -164,3 +165,29 @@ def test_analyze_text_does_not_drop_sentence_only_because_ad_filter_is_negative(
     assert payload["overall_suspicion_level"] == "의심"
     assert payload["sentence_results"][0]["suspicion_level"] == "의심"
     assert "건너뜀" not in payload["sentence_results"][0]["reason"]
+
+
+def test_analyze_text_forwards_uncertain_domain_copy_to_kobert(monkeypatch):
+    monkeypatch.setattr(analyze_router, "predict_ad", lambda _: (False, 0.02))
+    monkeypatch.setattr(analyze_router, "predict_cosmetic", lambda _: (False, 0.01))
+
+    async def fake_analyze_with_kobert(sentence, rule_result):
+        assert sentence == "급이 다른 98% 마데카소사이드"
+        assert rule_result.suspicion_level.value == "정상"
+        return rule_result.model_copy(
+            update={
+                "suspicion_level": SuspicionLevel.CAUTION,
+                "reason": "AI가 추가 판단했습니다.",
+                "score": 0.42,
+            }
+        )
+
+    monkeypatch.setattr(analyze_router, "analyze_with_kobert", fake_analyze_with_kobert)
+
+    with TestClient(app) as client:
+        response = _post_text(client, "급이 다른 98% 마데카소사이드")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["sentence_results"][0]["suspicion_level"] == "주의"
+    assert payload["sentence_results"][0]["reason"] == "AI가 추가 판단했습니다."
