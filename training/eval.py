@@ -143,6 +143,10 @@ def evaluate_and_save(
     with torch.no_grad():
         for batch in val_loader:
             inputs = {k: v.to(device) for k, v in batch.items() if k != "labels"}
+            # Some KoBERT tokenizer bundles emit token_type_ids outside BERT's
+            # supported 0/1 range. Service inference drops them for single-
+            # sentence classification, so evaluation must mirror that path.
+            inputs.pop("token_type_ids", None)
             labels = batch["labels"].to(device)
             outputs = model(**inputs)
             pred = torch.argmax(outputs.logits, dim=-1)
