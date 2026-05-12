@@ -1,0 +1,11 @@
+.git/
+.idea/
+.venv/
+.pytest_cache/
+__pycache__/
+.cache/
+data/
+docs/
+reports/
+tests/
+README_UPDATE.md
