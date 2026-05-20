@@ -132,13 +132,13 @@ sudo apt install tesseract-ocr tesseract-ocr-kor
 
 ```env
 # KoBERT 모델 경로 (학습 완료 후 모델 파일 위치)
-KOBERT_MODEL_PATH=models/kobert_ad_classifier
+KOBERT_MODEL_PATH=models/kobert_ad_classifier_relabel
 
 # KoBERT 사용 여부 (모델 없으면 false로 설정)
 USE_KOBERT=true
 ```
 
-> 모델 파일(`models/kobert_ad_classifier/`)은 Git에 포함되어 있지 않아요.
+> 기본 모델 파일(`models/kobert_ad_classifier_relabel/`)은 Git에 포함되어 있지 않아요.
 > 팀원에게 드라이브 링크로 받아서 해당 경로에 넣어주세요.
 > 모델 없이 실행하려면 `.env`에서 `USE_KOBERT=false` 로 설정하면 규칙기반 엔진만 동작해요.
 

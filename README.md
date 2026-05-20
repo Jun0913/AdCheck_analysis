@@ -36,7 +36,7 @@ Pre-filter → Rule Engine → KoBERT → NLI Verifier
 
 1. 사용자 입력 (텍스트 / URL / 이미지)
 2. Backend → Analysis Server 요청
-3. 텍스트 추출 (EasyOCR / 크롤링)
+3. 텍스트 추출 (Google Vision OCR / 크롤링)
 4. 문장 분리
 5. [0차] 전단 필터 — 잡음 컷 + 광고/화장품 도메인 선별
 6. [1차] 규칙 기반 엔진 — 키워드·도메인 필터
@@ -103,7 +103,15 @@ Analysis Server 추론
 - Frontend: React
 - Backend: Spring Boot
 - Analysis: Python (FastAPI), scikit-learn, KoBERT, mDeBERTa (NLI)
-- OCR: EasyOCR
+- OCR: Google Vision OCR (REST API Key), EasyOCR/PaddleOCR fallback
+
+### OCR 설정
+
+분석 서버는 기본적으로 `OCR_ENGINE=google` 로 동작한다.
+
+- `GOOGLE_VISION_API_KEY`: Google Vision API 키
+- `OCR_ENGINE=google`: Google Vision 우선 사용
+- `OCR_ENGINE=auto`: Google Vision 키가 있으면 우선 사용, 실패 시 EasyOCR/PaddleOCR fallback
 - DB: MySQL / PostgreSQL
 
 ---
