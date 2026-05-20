@@ -19,6 +19,7 @@
 
 import json
 import os
+import threading
 from pathlib import Path
 from analysis.services.model_runtime import prepare_model_runtime
 
@@ -47,6 +48,7 @@ NLI_DENY_THRESHOLD    = 0.50  # contradiction >= 이 값이면 위반 부정
 _nli_tokenizer = None
 _nli_model     = None
 _hypotheses_config = None
+_nli_model_lock = threading.Lock()
 
 
 _LEVEL_NAME_MAP = {
@@ -66,26 +68,44 @@ def _resolve_default_nli_model_path() -> str:
 
 
 NLI_MODEL_NAME = os.getenv("NLI_MODEL_PATH", _resolve_default_nli_model_path())
+USE_NLI = os.getenv("USE_NLI", "false").strip().lower() == "true"
 
 
 def _load_nli_model() -> bool:
     global _nli_tokenizer, _nli_model
+    if not USE_NLI:
+        return False
     if _nli_model is not None:
         return True
-    prepare_model_runtime()
-    try:
-        local_only = os.path.exists(NLI_MODEL_NAME)
-        _nli_tokenizer = AutoTokenizer.from_pretrained(NLI_MODEL_NAME, local_files_only=local_only)
-        _nli_model = AutoModelForSequenceClassification.from_pretrained(
-            NLI_MODEL_NAME,
-            local_files_only=local_only,
-        ).to(DEVICE)
-        _nli_model.eval()
-        print(f"[NLI] 모델 로드 완료: {NLI_MODEL_NAME}")
-        return True
-    except Exception as e:
-        print(f"[NLI] 모델 로드 실패: {e}")
-        return False
+    with _nli_model_lock:
+        if _nli_model is not None:
+            return True
+        prepare_model_runtime()
+        try:
+            local_only = os.path.exists(NLI_MODEL_NAME)
+            _nli_tokenizer = AutoTokenizer.from_pretrained(NLI_MODEL_NAME, local_files_only=local_only)
+            _nli_model = AutoModelForSequenceClassification.from_pretrained(
+                NLI_MODEL_NAME,
+                local_files_only=local_only,
+            ).to(DEVICE)
+            _nli_model.eval()
+            print(f"[NLI] 모델 로드 완료: {NLI_MODEL_NAME}")
+            return True
+        except Exception as e:
+            print(f"[NLI] 모델 로드 실패: {e}")
+            return False
+
+
+def is_nli_loaded() -> bool:
+    return _nli_model is not None
+
+
+def is_nli_available() -> bool:
+    return USE_NLI and os.path.exists(NLI_MODEL_NAME)
+
+
+def warm_nli_model() -> bool:
+    return _load_nli_model()
 
 
 def _load_hypotheses_config() -> dict[str, list[dict]]:
