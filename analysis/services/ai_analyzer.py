@@ -5,6 +5,7 @@
 """
 
 import os
+import threading
 from analysis.services.model_runtime import prepare_model_runtime
 
 prepare_model_runtime()
@@ -14,7 +15,11 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from analysis.models.schemas import SentenceResult, SuspicionLevel
 from analysis.services.nli_verifier import verify_with_nli
 from analysis.services.rule_engine import (
+    CONTEXT_ALLOW_NORMAL_REASON,
+    DEFAULT_NORMAL_REASON,
     EXTRA_ALLOW_NORMAL_REASON,
+    NON_DOMAIN_IMAGE_NORMAL_REASON,
+    NON_DOMAIN_NORMAL_REASON,
     STRICT_ALLOW_NORMAL_REASON,
     UNCERTAIN_DOMAIN_REASON,
 )
@@ -23,6 +28,7 @@ from analysis.services.rule_patterns import (
     MIN_PATTERN_LEVELS,
     STRONG_SUSPICIOUS_PATTERNS,
 )
+from analysis.services.rule_engine import FORBIDDEN_KEYWORDS
 
 # ────────────────────────────────────────────
 # 라벨 매핑: 학습 시 정의한 순서와 반드시 일치해야 함
@@ -92,7 +98,7 @@ def _build_kobert_reason(level: SuspicionLevel, rule_result: SentenceResult, wei
                 f"{kw_display} 같은 표현이 문장 전체 맥락에서 다소 과장되게 받아들여질 수 있습니다."
             )
 
-    # 키워드 없이 KoBERT만으로 잡힌 경우 — 문장에서 핵심 어절 추출
+    # 키워드 없이 KoBERT만으로 잡힌 경우 - 문장에서 핵심 어절 추출
     words = [w for w in rule_result.sentence.split() if len(w) > 1]
     sample = ", ".join(f"'{w}'" for w in words[:3]) if words else "해당 문구"
     if level == SuspicionLevel.SUSPICIOUS:
@@ -128,9 +134,15 @@ def _enforce_minimum_pattern_level(result: SentenceResult) -> SentenceResult:
             score=minimum_score,
         )
 
-    adjusted_reason = result.reason
-    if "정책상 최소" not in adjusted_reason:
-        adjusted_reason = f"{adjusted_reason} 정책상 최소 {minimum_level.value} 단계를 유지합니다."
+    if result.reason in NORMAL_REASON_TEXTS:
+        pattern_label = ", ".join(result.matched_patterns[:2]) if result.matched_patterns else "감지된 규칙"
+        adjusted_reason = (
+            f"{pattern_label} 관련 표현이 감지되어 정책상 최소 {minimum_level.value} 단계를 유지합니다."
+        )
+    else:
+        adjusted_reason = result.reason
+        if "정책상 최소" not in adjusted_reason:
+            adjusted_reason = f"{adjusted_reason} 정책상 최소 {minimum_level.value} 단계를 유지합니다."
 
     return SentenceResult(
         sentence=result.sentence,
@@ -141,14 +153,68 @@ def _enforce_minimum_pattern_level(result: SentenceResult) -> SentenceResult:
         score=max(result.score, minimum_score),
     )
 
-MODEL_PATH = os.getenv("KOBERT_MODEL_PATH", "models/kobert_ad_classifier")
+MODEL_PATH = os.getenv("KOBERT_MODEL_PATH", "models/kobert_ad_classifier_relabel")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _tokenizer = None
 _model = None
+_model_lock = threading.Lock()
 ALLOWLIST_NORMAL_REASONS = {
     STRICT_ALLOW_NORMAL_REASON,
     EXTRA_ALLOW_NORMAL_REASON,
 }
+NORMAL_REASON_TEXTS = {
+    DEFAULT_NORMAL_REASON,
+    CONTEXT_ALLOW_NORMAL_REASON,
+    NON_DOMAIN_NORMAL_REASON,
+    NON_DOMAIN_IMAGE_NORMAL_REASON,
+    UNCERTAIN_DOMAIN_REASON,
+    "현재 기준에서는 문제 표현이 확인되지 않았습니다.",
+    "짧은 광고 문구로 보이지만, 현재 기준에서는 문제 표현이 확인되지 않았습니다.",
+}
+
+
+def _infer_patterns_from_keywords(keywords: list[str]) -> list[str]:
+    inferred: list[str] = []
+    keyword_set = set(keywords)
+    for pattern, pattern_keywords in FORBIDDEN_KEYWORDS.items():
+        if keyword_set.intersection(pattern_keywords):
+            inferred.append(pattern)
+    return inferred
+
+
+def _ensure_consistent_reason(result: SentenceResult) -> SentenceResult:
+    if result.suspicion_level == SuspicionLevel.NORMAL:
+        return result
+
+    repaired_patterns = list(result.matched_patterns)
+    if not repaired_patterns and result.matched_keywords:
+        repaired_patterns = _infer_patterns_from_keywords(result.matched_keywords)
+
+    repaired_base = SentenceResult(
+        sentence=result.sentence,
+        suspicion_level=result.suspicion_level,
+        matched_keywords=result.matched_keywords,
+        matched_patterns=repaired_patterns,
+        reason=result.reason,
+        score=result.score,
+    )
+
+    if repaired_base.reason not in NORMAL_REASON_TEXTS and repaired_base.matched_patterns == result.matched_patterns:
+        return repaired_base
+
+    repaired_reason = _build_kobert_reason(
+        repaired_base.suspicion_level,
+        repaired_base,
+        repaired_base.score,
+    )
+    return SentenceResult(
+        sentence=repaired_base.sentence,
+        suspicion_level=repaired_base.suspicion_level,
+        matched_keywords=repaired_base.matched_keywords,
+        matched_patterns=repaired_base.matched_patterns,
+        reason=repaired_reason,
+        score=repaired_base.score,
+    )
 
 
 def _load_model():
@@ -156,18 +222,33 @@ def _load_model():
     global _tokenizer, _model
     if _model is not None:
         return True
-    prepare_model_runtime()
-    if not os.path.exists(MODEL_PATH):
-        print(f"[KoBERT] 모델 경로 없음: {MODEL_PATH}")
-        return False
-    try:
-        _tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
-        _model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH).to(DEVICE)
-        _model.eval()
-        return True
-    except Exception as e:
-        print(f"[KoBERT] 모델 로드 실패: {e}")
-        return False
+    with _model_lock:
+        if _model is not None:
+            return True
+        prepare_model_runtime()
+        if not os.path.exists(MODEL_PATH):
+            print(f"[KoBERT] 모델 경로 없음: {MODEL_PATH}")
+            return False
+        try:
+            _tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+            _model = AutoModelForSequenceClassification.from_pretrained(MODEL_PATH).to(DEVICE)
+            _model.eval()
+            return True
+        except Exception as e:
+            print(f"[KoBERT] 모델 로드 실패: {e}")
+            return False
+
+
+def is_kobert_loaded() -> bool:
+    return _model is not None
+
+
+def is_kobert_available() -> bool:
+    return os.path.exists(MODEL_PATH)
+
+
+def warm_kobert_model() -> bool:
+    return _load_model()
 
 
 async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> SentenceResult:
@@ -275,11 +356,13 @@ async def analyze_with_kobert(sentence: str, rule_result: SentenceResult) -> Sen
             or rule_result.suspicion_level != kobert_level
         )
         if should_call_nli:
-            return _enforce_minimum_pattern_level(
-                verify_with_nli(sentence, kobert_result, rule_result.matched_patterns)
+            return _ensure_consistent_reason(
+                _enforce_minimum_pattern_level(
+                    verify_with_nli(sentence, kobert_result, rule_result.matched_patterns)
+                )
             )
 
-        return _enforce_minimum_pattern_level(kobert_result)
+        return _ensure_consistent_reason(_enforce_minimum_pattern_level(kobert_result))
 
     except Exception as e:
         print(f"[KoBERT] 추론 오류: {e}")
@@ -308,6 +391,6 @@ def generate_summary(
     top = suspicious[0]
     return (
         f"총 {len(sentence_results)}개 문장 중 {len(suspicious)}개에서 {desc} 표현이 감지되었습니다. "
-        f"주요 문구: \"{top.sentence}\" — {top.reason} "
+        f"주요 문구: \"{top.sentence}\" - {top.reason} "
         f"광고 내용을 비판적으로 검토하시기 바랍니다."
     )
