@@ -53,16 +53,52 @@ _QUANT_PATTERNS = (
     ),
 )
 
+_GENERIC_METRIC_STOPWORDS = {
+    "사용", "후", "전", "주", "일", "회", "직후", "만으로", "단", "기준", "결과",
+}
+_GENERIC_METRIC_PREFIX_RE = re.compile(
+    r"^(?:사용\s*\d+\s*주\s*후|사용\s*\d+\s*일\s*후|사용\s*후|사용\s*직후|직후|"
+    r"단\s*\d+\s*회\s*만으로|단\s*1회\s*만으로|1회\s*사용으로|인체적용시험\s*결과)\s*"
+)
+
+
+def _refine_generic_metric_label(
+    sentence: str,
+    match: re.Match[str],
+    raw_metric: str,
+) -> str:
+    metric = " ".join(raw_metric.split()).strip()
+    if len(metric) >= 2:
+        return metric
+
+    left_context = sentence[match.start(): match.start("percent")].strip()
+    left_context = _GENERIC_METRIC_PREFIX_RE.sub("", left_context)
+    tokens = re.findall(r"[가-힣A-Za-z0-9]+", left_context)
+    tokens = [
+        token
+        for token in tokens
+        if token not in _GENERIC_METRIC_STOPWORDS
+        and not re.fullmatch(r"\d+", token)
+    ]
+    if not tokens:
+        return metric
+
+    return " ".join(tokens[-3:]).strip() or metric
+
 
 def detect_quantitative_claim(sentence: str) -> tuple[list[str], list[str]]:
     matched_keywords: list[str] = []
     matched_patterns: list[str] = []
 
-    for pattern in _QUANT_PATTERNS:
+    for idx, pattern in enumerate(_QUANT_PATTERNS):
         for match in pattern.finditer(sentence):
             metric = match.group("metric").strip()
             change = match.group("change").strip()
             percent = match.group("percent").strip()
+            if idx >= 2:
+                metric = _refine_generic_metric_label(sentence, match, metric)
+            if len(metric) < 2:
+                continue
             label = f"{metric} {percent} {change}"
             if label not in matched_keywords:
                 matched_keywords.append(label)

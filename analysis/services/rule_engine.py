@@ -571,3 +571,36 @@ def calculate_overall_score(results: list[SentenceResult]) -> tuple[float, Suspi
             level = SuspicionLevel.CAUTION
 
     return round(overall, 3), level
+
+
+def calculate_overall_score(results: list[SentenceResult]) -> tuple[float, SuspicionLevel]:
+    """Aggregate sentence scores into an overall score and final level."""
+    if not results:
+        return 0.0, SuspicionLevel.NORMAL
+
+    scores = sorted([r.score for r in results], reverse=True)
+    n = len(scores)
+
+    # Give the top third of sentence scores double weight.
+    k = max(1, n // 3)
+    weighted_sum = sum(scores[:k]) * 2.0 + sum(scores[k:])
+    total_weight = k * 2.0 + (n - k)
+    overall = weighted_sum / total_weight
+
+    if overall >= 0.55:
+        level = SuspicionLevel.SUSPICIOUS
+    elif overall >= 0.20:
+        level = SuspicionLevel.CAUTION
+    else:
+        level = SuspicionLevel.NORMAL
+
+    # If any sentence is caution/suspicious, keep the overall result at least caution.
+    if any(r.suspicion_level != SuspicionLevel.NORMAL for r in results) and level == SuspicionLevel.NORMAL:
+        level = SuspicionLevel.CAUTION
+
+    # High-confidence suspicious sentences should never collapse to normal.
+    if any(r.suspicion_level == SuspicionLevel.SUSPICIOUS and r.score >= 0.80 for r in results):
+        if level == SuspicionLevel.NORMAL:
+            level = SuspicionLevel.CAUTION
+
+    return round(overall, 3), level
