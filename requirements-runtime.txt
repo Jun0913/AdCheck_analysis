@@ -1,0 +1,20 @@
+# Runtime dependencies for the FastAPI analysis server.
+# This set keeps Docker images smaller by excluding training-only packages
+# and optional local OCR fallback engines.
+
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+httpx==0.27.2
+beautifulsoup4==4.12.3
+Pillow==10.4.0
+pydantic==2.9.2
+python-dotenv==1.0.1
+opencv-python-headless==4.10.0.84
+kss==4.5.4
+
+# ML inference stack
+transformers==4.41.2
+scikit-learn>=1.4.0
+numpy<2
+joblib>=1.3.0

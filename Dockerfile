@@ -7,9 +7,7 @@ ENV PIP_NO_CACHE_DIR=1
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     ffmpeg \
-    git \
     libgomp1 \
     libgl1 \
     libglib2.0-0 \
@@ -18,8 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
-RUN pip install --upgrade pip && pip install -r requirements.txt
+COPY requirements-runtime.txt ./
+RUN pip install --upgrade pip \
+    && pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cpu \
+    && pip install -r requirements-runtime.txt
 
 COPY . .
 

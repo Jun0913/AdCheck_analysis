@@ -1,40 +1,4 @@
-# 서버
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-python-multipart==0.0.9
-httpx==0.27.2
-beautifulsoup4==4.12.3
-Pillow==10.4.0
-pydantic==2.9.2
-python-dotenv==1.0.1
-opencv-python-headless==4.10.0.84
+# Full local development / training environment.
+# For the smaller production Docker image, use requirements-runtime.txt instead.
 
-# 한국어 문장 분리
-kss==4.5.4
-
-# OCR
-easyocr>=1.7.1
-paddleocr>=3.5.0
-paddlepaddle>=3.2.0
-
-# KoBERT / 모델 학습
-# 기본 설치만으로 CPU 환경에서 서버/테스트가 바로 동작하도록 고정 버전 제공
-# GPU 환경에서는 설치 후 CUDA 빌드로 덮어써도 됩니다.
-#
-#   CUDA 버전 확인: nvidia-smi
-#
-#   CUDA 12.4: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-#   CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-#   CUDA 11.8: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-#   CPU 전용:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-#
-#   설치 확인: python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-# ⚠️ playwright 설치 후 브라우저도 별도 설치 필요
-#   python -m playwright install chromium
-
-torch==2.1.2
-transformers==4.41.2
-scikit-learn>=1.4.0
-pandas>=2.0.0
-# KoBERT tokenizer/model (HF port)
-git+https://github.com/SKTBrain/KoBERT.git#subdirectory=kobert_hf
+-r requirements-train.txt

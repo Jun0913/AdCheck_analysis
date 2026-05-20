@@ -1,0 +1,9 @@
+-r requirements-runtime.txt
+
+# Training / evaluation / local OCR extras
+torch==2.1.2
+pandas>=2.0.0
+easyocr>=1.7.1
+paddleocr>=3.5.0
+paddlepaddle>=3.2.0
+git+https://github.com/SKTBrain/KoBERT.git#subdirectory=kobert_hf
