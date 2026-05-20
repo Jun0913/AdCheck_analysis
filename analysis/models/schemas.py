@@ -1,6 +1,6 @@
-from pydantic import BaseModel
-from typing import Optional, List
 from enum import Enum
+
+from pydantic import BaseModel
 
 
 class InputType(str, Enum):
@@ -16,22 +16,23 @@ class SuspicionLevel(str, Enum):
 
 
 class AnalyzeRequest(BaseModel):
-    input_type: InputType
-    content: str  # 텍스트 or URL (이미지는 별도 엔드포인트)
+    # Default to text so older callers can send only {"content": "..."}.
+    input_type: InputType = InputType.TEXT
+    content: str
 
 
 class SentenceResult(BaseModel):
     sentence: str
     suspicion_level: SuspicionLevel
-    matched_keywords: List[str]
-    matched_patterns: List[str] = []  # 규칙 엔진이 감지한 패턴 태그 (NLI 가설 선택용)
+    matched_keywords: list[str]
+    matched_patterns: list[str] = []
     reason: str
-    score: float = 0.0  # 0.0 ~ 1.0 연속 의심도 점수 (KoBERT weighted_score 기반)
+    score: float = 0.0
 
 
 class AnalyzeResponse(BaseModel):
     original_text: str
     overall_suspicion_level: SuspicionLevel
-    overall_score: float  # 0.0 ~ 1.0
-    sentence_results: List[SentenceResult]
+    overall_score: float
+    sentence_results: list[SentenceResult]
     summary: str
