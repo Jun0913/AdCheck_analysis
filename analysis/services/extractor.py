@@ -1,3 +1,4 @@
+import base64
 import httpx
 from bs4 import BeautifulSoup
 import os
@@ -26,14 +27,26 @@ _easy_reader = None
 _paddle_reader = None
 OCR_PRIMARY_MIN_SCORE = 0.45
 OCR_PRIMARY_MIN_TEXT_LEN = 12
-OCR_ENGINE = os.getenv("OCR_ENGINE", "easy").strip().lower()
+OCR_ENGINE = os.getenv("OCR_ENGINE", "google").strip().lower()
 OCR_MAX_SIDE = int(os.getenv("OCR_MAX_SIDE", "2200"))
 OCR_ROW_MAX_SIDE = int(os.getenv("OCR_ROW_MAX_SIDE", "1800"))
+GOOGLE_VISION_MAX_SIDE = int(os.getenv("GOOGLE_VISION_MAX_SIDE", "1400"))
+GOOGLE_VISION_JPEG_QUALITY = max(40, min(95, int(os.getenv("GOOGLE_VISION_JPEG_QUALITY", "80"))))
 OCR_PRIMARY_VARIANT_LIMIT = max(1, int(os.getenv("OCR_PRIMARY_VARIANT_LIMIT", "4")))
 OCR_FALLBACK_VARIANT_LIMIT = max(1, int(os.getenv("OCR_FALLBACK_VARIANT_LIMIT", "2")))
+GOOGLE_VISION_VARIANT_LIMIT = max(1, int(os.getenv("GOOGLE_VISION_VARIANT_LIMIT", "1")))
+GOOGLE_VISION_ENABLE_ROW_CROPS = os.getenv("GOOGLE_VISION_ENABLE_ROW_CROPS", "false").strip().lower() == "true"
 OCR_ROW_CROP_MIN_SCORE = float(os.getenv("OCR_ROW_CROP_MIN_SCORE", "0.38"))
 OCR_EARLY_EXIT_SCORE = float(os.getenv("OCR_EARLY_EXIT_SCORE", "0.72"))
 OCR_EARLY_EXIT_TEXT_LEN = int(os.getenv("OCR_EARLY_EXIT_TEXT_LEN", "24"))
+GOOGLE_VISION_API_KEY = os.getenv("GOOGLE_VISION_API_KEY", "").strip()
+GOOGLE_VISION_ENDPOINT = os.getenv(
+    "GOOGLE_VISION_ENDPOINT",
+    "https://vision.googleapis.com/v1/images:annotate",
+).strip()
+GOOGLE_VISION_TIMEOUT = float(os.getenv("GOOGLE_VISION_TIMEOUT", "5"))
+GOOGLE_VISION_FEATURE = os.getenv("GOOGLE_VISION_FEATURE", "TEXT_DETECTION").strip().upper()
+GOOGLE_VISION_MAX_RESULTS = max(1, int(os.getenv("GOOGLE_VISION_MAX_RESULTS", "1")))
 OCR_CORRECTIONS = {
     "피부릍": "피부를",
     "피부륻": "피부를",
@@ -157,6 +170,38 @@ def _encode_png(image) -> bytes:
     return buf.tobytes() if ok else b""
 
 
+def _encode_jpeg(image, quality: int) -> bytes:
+    ok, buf = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+    return buf.tobytes() if ok else b""
+
+
+def _sanitize_sslkeylogfile() -> None:
+    sslkeylogfile = os.getenv("SSLKEYLOGFILE", "").strip()
+    if not sslkeylogfile:
+        return
+    try:
+        with open(sslkeylogfile, "a", encoding="utf-8"):
+            pass
+    except OSError:
+        os.environ.pop("SSLKEYLOGFILE", None)
+
+
+def _prepare_google_vision_image(image_bytes: bytes) -> bytes:
+    """
+    Service-mode optimization for remote OCR:
+    shrink large screenshots before base64 upload so request size stays bounded.
+    """
+    try:
+        img = _decode_image(image_bytes)
+        if img is None:
+            return image_bytes
+        img = _resize_to_max_side(img, GOOGLE_VISION_MAX_SIDE)
+        encoded = _encode_jpeg(img, GOOGLE_VISION_JPEG_QUALITY)
+        return encoded or image_bytes
+    except Exception:
+        return image_bytes
+
+
 def _extract_text_rows(image_bytes: bytes) -> list[bytes]:
     """
     체크리스트/배너형 이미지에서 텍스트 줄 단위로 분리한다.
@@ -276,6 +321,7 @@ def _build_ocr_variants(image_bytes: bytes) -> list[tuple[str, bytes]]:
 
 def _select_ocr_variants(variants: list[tuple[str, bytes]], limit: int) -> list[tuple[str, bytes]]:
     preferred_order = {
+        "google_fast": 0,
         "original": 0,
         "grayscale_clahe": 1,
         "sharpened": 2,
@@ -387,6 +433,120 @@ def _run_paddleocr_once(image_bytes: bytes, *, min_confidence: float) -> dict:
         "confidences": confidences,
         "raw_count": len(texts),
     }
+
+
+def _parse_google_vision_response(payload: dict) -> dict:
+    responses = payload.get("responses") or []
+    if not responses:
+        return {"text": "", "score": 0.0, "confidences": [], "raw_count": 0}
+
+    response = responses[0] or {}
+    error = response.get("error") or {}
+    if error:
+        message = error.get("message") or "Google Vision OCR 요청이 실패했습니다."
+        raise RuntimeError(message)
+
+    annotations = response.get("textAnnotations") or []
+    full_text = ""
+    confidences: list[float] = []
+
+    if annotations:
+        first = annotations[0] or {}
+        full_text = str(first.get("description") or "").strip()
+
+    full_text_annotation = response.get("fullTextAnnotation") or {}
+    pages = full_text_annotation.get("pages") or []
+    for page in pages:
+        for block in page.get("blocks") or []:
+            block_conf = block.get("confidence")
+            if isinstance(block_conf, (int, float)):
+                confidences.append(float(block_conf))
+            for paragraph in block.get("paragraphs") or []:
+                para_conf = paragraph.get("confidence")
+                if isinstance(para_conf, (int, float)):
+                    confidences.append(float(para_conf))
+                for word in paragraph.get("words") or []:
+                    word_conf = word.get("confidence")
+                    if isinstance(word_conf, (int, float)):
+                        confidences.append(float(word_conf))
+
+    text = _normalize_ocr_text(full_text)
+    score = _ocr_quality_score(text, confidences or ([0.9] if text else []))
+    return {
+        "text": text,
+        "score": score,
+        "confidences": confidences,
+        "raw_count": max(len(annotations) - 1, 0),
+    }
+
+
+def _run_google_vision_once(image_bytes: bytes) -> dict:
+    if not GOOGLE_VISION_API_KEY:
+        raise RuntimeError("GOOGLE_VISION_API_KEY가 설정되어 있지 않습니다.")
+
+    _sanitize_sslkeylogfile()
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    body = {
+        "requests": [
+            {
+                "image": {"content": encoded},
+                "features": [{"type": GOOGLE_VISION_FEATURE, "maxResults": GOOGLE_VISION_MAX_RESULTS}],
+                "imageContext": {"languageHints": ["ko", "en"]},
+            }
+        ]
+    }
+
+    try:
+        response = httpx.post(
+            GOOGLE_VISION_ENDPOINT,
+            params={"key": GOOGLE_VISION_API_KEY},
+            json=body,
+            timeout=GOOGLE_VISION_TIMEOUT,
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(f"Google Vision OCR HTTP 오류({e.response.status_code}): {e.response.text}") from e
+    except httpx.HTTPError as e:
+        raise RuntimeError(f"Google Vision OCR 호출 실패: {e}") from e
+
+    try:
+        payload = response.json()
+    except ValueError as e:
+        raise RuntimeError("Google Vision OCR 응답이 JSON이 아닙니다.") from e
+
+    return _parse_google_vision_response(payload)
+
+
+def _extract_with_google_vision_variants(image_bytes: bytes) -> str:
+    prepared_bytes = _prepare_google_vision_image(image_bytes)
+    variants = [("google_fast", prepared_bytes)]
+    if GOOGLE_VISION_VARIANT_LIMIT > 1:
+        variants.extend(_build_ocr_variants(prepared_bytes))
+    best = {"text": "", "score": 0.0}
+
+    primary_variants = _select_ocr_variants(variants, GOOGLE_VISION_VARIANT_LIMIT)
+    for name, variant_bytes in primary_variants:
+        candidate = _run_google_vision_once(variant_bytes)
+        if candidate["score"] > best["score"]:
+            best = {**candidate, "variant": name}
+        if _is_strong_ocr_candidate(best) or len(best["text"].strip()) >= OCR_PRIMARY_MIN_TEXT_LEN:
+            return best["text"]
+
+    if GOOGLE_VISION_ENABLE_ROW_CROPS and best["score"] < OCR_ROW_CROP_MIN_SCORE:
+        row_texts = []
+        row_scores = []
+        for row_bytes in _extract_text_rows(image_bytes):
+            candidate = _run_google_vision_once(row_bytes)
+            if candidate["text"]:
+                row_texts.append(candidate["text"])
+                row_scores.append(candidate["score"])
+        if row_texts:
+            row_joined = _normalize_ocr_text("\n".join(row_texts))
+            row_score = (sum(row_scores) / max(len(row_scores), 1)) + min(len(row_texts) / 20.0, 0.2)
+            if row_score > best["score"] and len(row_joined) >= len(best["text"]) * 0.7:
+                best = {"text": row_joined, "score": round(row_score, 4), "variant": "row_crops"}
+
+    return best["text"]
 
 
 def _extract_with_easyocr_variants(image_bytes: bytes) -> str:
@@ -631,6 +791,7 @@ async def extract_from_url(url: str) -> str:
 async def _extract_with_httpx(url: str) -> str:
     """httpx + BeautifulSoup으로 텍스트 추출 (1단계)"""
     url = _normalize_url(url)
+    _sanitize_sslkeylogfile()
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -715,8 +876,14 @@ def extract_from_image(image_bytes: bytes) -> str:
     - 결과는 간단한 OCR 오타 교정을 거쳐 반환
     """
     engine = OCR_ENGINE
-    if engine not in {"auto", "paddle", "easy"}:
+    if engine not in {"auto", "paddle", "easy", "google", "vision", "google_vision"}:
         engine = "auto"
+
+    if engine in {"google", "vision", "google_vision"}:
+        try:
+            return _extract_with_google_vision_variants(image_bytes)
+        except Exception as e:
+            raise RuntimeError(f"Google Vision OCR 텍스트 추출 실패: {e}")
 
     if engine == "paddle":
         if not _PADDLEOCR_AVAILABLE:
@@ -734,6 +901,14 @@ def extract_from_image(image_bytes: bytes) -> str:
         except Exception as e:
             raise RuntimeError(f"EasyOCR 텍스트 추출 실패: {e}")
 
+    if GOOGLE_VISION_API_KEY:
+        try:
+            text = _extract_with_google_vision_variants(image_bytes)
+            if len(text.strip()) >= OCR_PRIMARY_MIN_TEXT_LEN:
+                return text
+        except Exception:
+            pass
+
     if _EASYOCR_AVAILABLE:
         try:
             text = _extract_with_easyocr_variants(image_bytes)
@@ -749,6 +924,18 @@ def extract_from_image(image_bytes: bytes) -> str:
                 return text
         except Exception:
             pass
+
+    if GOOGLE_VISION_API_KEY:
+        try:
+            return _extract_with_google_vision_variants(image_bytes)
+        except Exception:
+            pass
+
+    if _PADDLEOCR_AVAILABLE and not _EASYOCR_AVAILABLE:
+        try:
+            return _extract_with_paddleocr_variants(image_bytes)
+        except Exception as e:
+            raise RuntimeError(f"PaddleOCR 텍스트 추출 실패: {e}")
 
     if not _EASYOCR_AVAILABLE:
         raise RuntimeError("사용 가능한 OCR 엔진이 없습니다. paddleocr 또는 easyocr를 설치하세요.")
