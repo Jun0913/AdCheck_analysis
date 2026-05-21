@@ -38,8 +38,59 @@ GET /health
 ```json
 {
   "status": "ok",
-  "service": "광고체크 Spring Boot 서버",
-  "python_server": "ok"
+  "service": "광고체크 분석 서버",
+  "use_kobert": true,
+  "kobert_ready": true,
+  "kobert_available": true,
+  "nli_ready": false,
+  "nli_available": false,
+  "warmup_in_progress": false,
+  "ready": true,
+  "startup_error": null
+}
+```
+
+---
+
+### 1-1. 분석 서버 준비 상태 확인
+
+```
+GET /ready
+```
+
+- 모델 preload가 완료되면 `200 OK`
+- 아직 기동 중이거나 preload 실패면 `503 Service Unavailable`
+- 배포 환경의 readiness probe는 `/health`가 아니라 `/ready`를 사용 권장
+
+**준비 완료 응답**
+```json
+{
+  "status": "ok",
+  "service": "광고체크 분석 서버",
+  "use_kobert": true,
+  "kobert_ready": true,
+  "kobert_available": true,
+  "nli_ready": false,
+  "nli_available": false,
+  "warmup_in_progress": false,
+  "ready": true,
+  "startup_error": null
+}
+```
+
+**준비 전 응답 예시**
+```json
+{
+  "status": "not_ready",
+  "service": "광고체크 분석 서버",
+  "use_kobert": true,
+  "kobert_ready": false,
+  "kobert_available": true,
+  "nli_ready": false,
+  "nli_available": false,
+  "warmup_in_progress": true,
+  "ready": false,
+  "startup_error": null
 }
 ```
 
@@ -167,6 +218,7 @@ GET /history/{id}
 | 엔드포인트 | 용도 |
 |---|---|
 | `GET /health` | 분석 서버 상태 확인 |
+| `GET /ready` | 모델 preload 완료 여부 확인 |
 | `POST /analyze/text` | 텍스트 분석 요청 |
 | `POST /analyze/url` | URL 분석 요청용 호환 엔드포인트 |
 | `POST /analyze/image` | 이미지 분석 요청 |

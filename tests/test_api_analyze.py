@@ -24,6 +24,18 @@ def test_health_endpoint_reports_model_status():
     assert payload["status"] == "ok"
     assert "kobert_ready" in payload
     assert "nli_ready" in payload
+    assert "ready" in payload
+    assert "warmup_in_progress" in payload
+
+
+def test_ready_endpoint_reports_server_is_ready_after_startup():
+    with TestClient(app) as client:
+        response = client.get("/ready")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["ready"] is True
 
 
 def test_analyze_text_flags_medical_claim():

@@ -4,6 +4,7 @@ import threading
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from analysis.routers import analyze
@@ -22,18 +23,62 @@ load_dotenv()
 MODEL_WARMUP_MODE = os.getenv("MODEL_WARMUP_MODE", "sync").strip().lower()
 
 
-def _warm_models_in_background() -> None:
+def _build_readiness_payload() -> dict:
+    use_kobert = analyze.USE_KOBERT
+    return {
+        "status": "ok",
+        "service": "광고체크 분석 서버",
+        "use_kobert": use_kobert,
+        "kobert_ready": is_kobert_loaded() if use_kobert else False,
+        "kobert_available": is_kobert_available() if use_kobert else False,
+        "nli_ready": is_nli_loaded(),
+        "nli_available": is_nli_available(),
+    }
+
+
+def _set_startup_state(
+    app: FastAPI,
+    *,
+    ready: bool,
+    warmup_in_progress: bool,
+    startup_error: str | None = None,
+) -> None:
+    app.state.ready = ready
+    app.state.warmup_in_progress = warmup_in_progress
+    app.state.startup_error = startup_error
+
+
+def _warm_models_or_raise() -> None:
+    if analyze.USE_KOBERT:
+        if not is_kobert_available():
+            raise RuntimeError("KoBERT 모델 경로를 찾지 못했습니다.")
+        if not warm_kobert_model():
+            raise RuntimeError("KoBERT 모델 preload에 실패했습니다.")
+
+    if is_nli_available() or os.getenv("USE_NLI", "false").strip().lower() == "true":
+        if not is_nli_available():
+            raise RuntimeError("NLI 모델 경로를 찾지 못했습니다.")
+        if not warm_nli_model():
+            raise RuntimeError("NLI 모델 preload에 실패했습니다.")
+
+
+def _warm_models_in_background(app: FastAPI) -> None:
     try:
-        if analyze.USE_KOBERT and is_kobert_available():
-            warm_kobert_model()
-        if is_nli_available():
-            warm_nli_model()
+        _warm_models_or_raise()
+        _set_startup_state(app, ready=True, warmup_in_progress=False)
     except Exception as e:
-        print(f"[startup] model warmup skipped: {e}")
+        _set_startup_state(
+            app,
+            ready=False,
+            warmup_in_progress=False,
+            startup_error=str(e),
+        )
+        print(f"[startup] model warmup failed: {e}")
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
+    _set_startup_state(app, ready=False, warmup_in_progress=True)
     print(
         "[startup] "
         f"USE_KOBERT={analyze.USE_KOBERT} "
@@ -41,15 +86,21 @@ async def lifespan(_: FastAPI):
         f"NLI_AVAILABLE={is_nli_available()}"
     )
     if MODEL_WARMUP_MODE == "background":
-        threading.Thread(target=_warm_models_in_background, name="model-warmup", daemon=True).start()
+        threading.Thread(
+            target=_warm_models_in_background,
+            args=(app,),
+            name="model-warmup",
+            daemon=True,
+        ).start()
     else:
-        _warm_models_in_background()
+        _warm_models_or_raise()
+        _set_startup_state(app, ready=True, warmup_in_progress=False)
     yield
 
 
 app = FastAPI(
-    title="??嫄몃졇?? - ?덉쐞怨쇱옣 愿묎퀬 ?섏떖??遺꾩꽍 ?쒕쾭",
-    description="愿묎퀬 臾멸뎄, URL, ?대?吏瑜?遺꾩꽍?섏뿬 ?덉쐞怨쇱옣 媛?μ꽦???쒓났?⑸땲??",
+    title="광고체크 - 허위과장 광고 의심도 분석 서버",
+    description="광고 문구, URL, 이미지를 분석하여 허위과장 가능성을 제공합니다.",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -67,13 +118,30 @@ app.include_router(analyze.router)
 
 @app.get("/health")
 def health_check():
-    use_kobert = analyze.USE_KOBERT
-    return {
-        "status": "ok",
-        "service": "??嫄몃졇?? 遺꾩꽍 ?쒕쾭",
-        "use_kobert": use_kobert,
-        "kobert_ready": is_kobert_loaded() if use_kobert else False,
-        "kobert_available": is_kobert_available() if use_kobert else False,
-        "nli_ready": is_nli_loaded(),
-        "nli_available": is_nli_available(),
-    }
+    payload = _build_readiness_payload()
+    payload.update(
+        {
+            "warmup_in_progress": bool(getattr(app.state, "warmup_in_progress", False)),
+            "ready": bool(getattr(app.state, "ready", False)),
+            "startup_error": getattr(app.state, "startup_error", None),
+        }
+    )
+    return payload
+
+
+@app.get("/ready")
+def readiness_check():
+    payload = _build_readiness_payload()
+    payload.update(
+        {
+            "warmup_in_progress": bool(getattr(app.state, "warmup_in_progress", False)),
+            "ready": bool(getattr(app.state, "ready", False)),
+            "startup_error": getattr(app.state, "startup_error", None),
+        }
+    )
+
+    if payload["ready"]:
+        return payload
+
+    payload["status"] = "not_ready"
+    return JSONResponse(status_code=503, content=payload)
