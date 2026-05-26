@@ -7,7 +7,7 @@ _MODEL_RUNTIME_READY = False
 
 def prepare_model_runtime() -> None:
     """
-    Normalize model-related environment variables so KoBERT/NLI downloads and caches
+    Normalize model-related environment variables so KoBERT downloads and caches
     stay inside the project workspace and do not fail on unrelated system paths.
     """
     global _MODEL_RUNTIME_READY

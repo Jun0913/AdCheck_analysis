@@ -13,11 +13,6 @@ from analysis.services.ai_analyzer import (
     is_kobert_loaded,
     warm_kobert_model,
 )
-from analysis.services.nli_verifier import (
-    is_nli_available,
-    is_nli_loaded,
-    warm_nli_model,
-)
 
 load_dotenv()
 MODEL_WARMUP_MODE = os.getenv("MODEL_WARMUP_MODE", "sync").strip().lower()
@@ -31,8 +26,6 @@ def _build_readiness_payload() -> dict:
         "use_kobert": use_kobert,
         "kobert_ready": is_kobert_loaded() if use_kobert else False,
         "kobert_available": is_kobert_available() if use_kobert else False,
-        "nli_ready": is_nli_loaded(),
-        "nli_available": is_nli_available(),
     }
 
 
@@ -55,12 +48,6 @@ def _warm_models_or_raise() -> None:
         if not warm_kobert_model():
             raise RuntimeError("KoBERT 모델 preload에 실패했습니다.")
 
-    if is_nli_available() or os.getenv("USE_NLI", "false").strip().lower() == "true":
-        if not is_nli_available():
-            raise RuntimeError("NLI 모델 경로를 찾지 못했습니다.")
-        if not warm_nli_model():
-            raise RuntimeError("NLI 모델 preload에 실패했습니다.")
-
 
 def _warm_models_in_background(app: FastAPI) -> None:
     try:
@@ -82,8 +69,7 @@ async def lifespan(app: FastAPI):
     print(
         "[startup] "
         f"USE_KOBERT={analyze.USE_KOBERT} "
-        f"KOBERT_AVAILABLE={is_kobert_available()} "
-        f"NLI_AVAILABLE={is_nli_available()}"
+        f"KOBERT_AVAILABLE={is_kobert_available()}"
     )
     if MODEL_WARMUP_MODE == "background":
         threading.Thread(

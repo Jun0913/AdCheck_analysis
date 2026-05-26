@@ -42,8 +42,6 @@ GET /health
   "use_kobert": true,
   "kobert_ready": true,
   "kobert_available": true,
-  "nli_ready": false,
-  "nli_available": false,
   "warmup_in_progress": false,
   "ready": true,
   "startup_error": null
@@ -70,8 +68,6 @@ GET /ready
   "use_kobert": true,
   "kobert_ready": true,
   "kobert_available": true,
-  "nli_ready": false,
-  "nli_available": false,
   "warmup_in_progress": false,
   "ready": true,
   "startup_error": null
@@ -86,8 +82,6 @@ GET /ready
   "use_kobert": true,
   "kobert_ready": false,
   "kobert_available": true,
-  "nli_ready": false,
-  "nli_available": false,
   "warmup_in_progress": true,
   "ready": false,
   "startup_error": null
@@ -273,8 +267,7 @@ FastAPI (8000)
   2. 문장 분리 (kss 우선, 없으면 정규식 폴백)
   3. 규칙 기반 1차 판정
   4. 선택적 KoBERT 문맥 판정
-  5. 조건부 NLI 보정 (설정 시)
-  6. JSON 결과 반환
+  5. KoBERT 결과 보정 및 JSON 결과 반환
   ↓
 Spring Boot (8080)
   3. 결과 저장

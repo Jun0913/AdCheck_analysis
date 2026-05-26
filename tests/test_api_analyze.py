@@ -23,7 +23,6 @@ def test_health_endpoint_reports_model_status():
     payload = response.json()
     assert payload["status"] == "ok"
     assert "kobert_ready" in payload
-    assert "nli_ready" in payload
     assert "ready" in payload
     assert "warmup_in_progress" in payload
 

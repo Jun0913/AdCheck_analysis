@@ -7,7 +7,6 @@ AI가 광고 내용을 분석하고 허위·과장 가능성을 탐지하는 웹
 - 0차: 전단 필터 (잡음 컷 + 광고/화장품 도메인 선별)
 - 1차: 규칙 기반 엔진 (키워드 + 도메인 필터)
 - 2차: KoBERT 모델 (문맥 분석)
-- 3차: NLI 검증 레이어 (클레임 의미 검증, 조건부 호출)
 - 출력: 주의 / 의심 / 정상 + 이유 설명 + 연속 의심도 점수
 
 ---
@@ -28,7 +27,7 @@ Spring Boot Backend
         ↓
 Python Analysis Server (FastAPI)
         ↓
-Pre-filter → Rule Engine → KoBERT → NLI Verifier
+Pre-filter → Rule Engine → KoBERT
 
 ---
 
@@ -41,9 +40,8 @@ Pre-filter → Rule Engine → KoBERT → NLI Verifier
 5. [0차] 전단 필터 — 잡음 컷 + 광고/화장품 도메인 선별
 6. [1차] 규칙 기반 엔진 — 키워드·도메인 필터
 7. [2차] KoBERT 모델 — 문맥 분석
-8. [3차] NLI 검증 — 애매한 케이스 클레임 의미 검증 (조건부)
-9. 의심도 점수 집계 및 설명 생성
-10. 결과 반환
+8. 의심도 점수 집계 및 설명 생성 
+9. 9.결과 반환
 
 ---
 
@@ -92,17 +90,11 @@ Analysis Server 추론
 ### 2차: KoBERT 모델
 문장 전체 문맥 분석 → 연속 의심도 점수 산출 (0.0 ~ 1.0)
 
-### 3차: NLI 검증 레이어
-규칙 엔진 패턴 감지 + KoBERT 점수가 회색지대(0.35~0.65)이거나 두 결과가 엇갈릴 때만 호출
-위반 가설 텍스트와 대조하여 클레임 의미를 검증하고 최종 결과 보정
-
----
-
 ## 9. 기술 스택
 
 - Frontend: React
 - Backend: Spring Boot
-- Analysis: Python (FastAPI), scikit-learn, KoBERT, mDeBERTa (NLI)
+- Analysis: Python (FastAPI), scikit-learn, KoBERT
 - OCR: Google Vision OCR (REST API Key), EasyOCR/PaddleOCR fallback
 
 ### OCR 설정
@@ -139,4 +131,4 @@ Analysis Server 추론
 
 ## 12. 한 줄 요약
 
-광고 문장을 입력하면 전단 필터 + 규칙 기반 + KoBERT + NLI 다단계 AI가 허위·과장 여부와 그 이유까지 설명해주는 시스템
+광고 문장을 입력하면 전단 필터 + 규칙 기반 + KoBERT 다단계 AI가 허위·과장 여부와 그 이유까지 설명해주는 시스템
