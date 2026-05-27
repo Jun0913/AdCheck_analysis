@@ -1,11 +1,11 @@
-from contextlib import asynccontextmanager
+﻿from contextlib import asynccontextmanager
 import os
 import threading
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from analysis.routers import analyze
 from analysis.services.ai_analyzer import (
@@ -22,7 +22,7 @@ def _build_readiness_payload() -> dict:
     use_kobert = analyze.USE_KOBERT
     return {
         "status": "ok",
-        "service": "광고체크 분석 서버",
+        "service": "adcheck-analysis-server",
         "use_kobert": use_kobert,
         "kobert_ready": is_kobert_loaded() if use_kobert else False,
         "kobert_available": is_kobert_available() if use_kobert else False,
@@ -44,9 +44,9 @@ def _set_startup_state(
 def _warm_models_or_raise() -> None:
     if analyze.USE_KOBERT:
         if not is_kobert_available():
-            raise RuntimeError("KoBERT 모델 경로를 찾지 못했습니다.")
+            raise RuntimeError("KoBERT model path was not found.")
         if not warm_kobert_model():
-            raise RuntimeError("KoBERT 모델 preload에 실패했습니다.")
+            raise RuntimeError("KoBERT model preload failed.")
 
 
 def _warm_models_in_background(app: FastAPI) -> None:
@@ -85,8 +85,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="광고체크 - 허위과장 광고 의심도 분석 서버",
-    description="광고 문구, URL, 이미지를 분석하여 허위과장 가능성을 제공합니다.",
+    title="AdCheck Analysis Server",
+    description="Analyze ad copy and images for suspicious claims.",
     version="0.1.0",
     lifespan=lifespan,
 )

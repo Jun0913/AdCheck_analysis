@@ -5,7 +5,6 @@ from pydantic import BaseModel
 
 class InputType(str, Enum):
     TEXT = "text"
-    URL = "url"
     IMAGE = "image"
 
 
