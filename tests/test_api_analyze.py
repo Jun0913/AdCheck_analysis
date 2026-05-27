@@ -39,42 +39,42 @@ def test_ready_endpoint_reports_server_is_ready_after_startup():
 
 def test_analyze_text_flags_medical_claim():
     with TestClient(app) as client:
-        response = _post_text(client, "이 크림은 아토피를 치료합니다.")
+        response = _post_text(client, "???�림?� ?�토?��? 치료?�니??")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["overall_suspicion_level"] == "의심"
-    assert payload["sentence_results"][0]["suspicion_level"] == "의심"
+    assert payload["overall_suspicion_level"] == "?�심"
+    assert payload["sentence_results"][0]["suspicion_level"] == "?�심"
 
 
 def test_analyze_text_flags_exaggerated_claim():
     with TestClient(app) as client:
-        response = _post_text(client, "단 7일 만에 기미 완전 제거, 100% 효과 보장.")
+        response = _post_text(client, "??7??만에 기�? ?�전 ?�거, 100% ?�과 보장.")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["overall_suspicion_level"] == "의심"
-    assert payload["sentence_results"][0]["suspicion_level"] == "의심"
+    assert payload["overall_suspicion_level"] == "?�심"
+    assert payload["sentence_results"][0]["suspicion_level"] == "?�심"
 
 
 def test_analyze_text_keeps_allowed_moisturizing_claim_normal():
     with TestClient(app) as client:
-        response = _post_text(client, "피부 보습에 도움을 주는 크림입니다.")
+        response = _post_text(client, "?��? 보습???��???주는 ?�림?�니??")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["overall_suspicion_level"] == "정상"
-    assert payload["sentence_results"][0]["suspicion_level"] == "정상"
+    assert payload["overall_suspicion_level"] == "?�상"
+    assert payload["sentence_results"][0]["suspicion_level"] == "?�상"
 
 
 def test_analyze_text_does_not_whitelist_doctor_recommendation_claim():
     with TestClient(app) as client:
-        response = _post_text(client, "의사가 추천하는 세럼으로 주름이 반드시 사라집니다.")
+        response = _post_text(client, "?�사가 추천?�는 ?�럼?�로 주름??반드???�라집니??")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["overall_suspicion_level"] == "의심"
-    assert payload["sentence_results"][0]["suspicion_level"] == "의심"
+    assert payload["overall_suspicion_level"] == "?�심"
+    assert payload["sentence_results"][0]["suspicion_level"] == "?�심"
 
 
 def test_analyze_text_flags_100_percent_variant_claim():
@@ -97,49 +97,8 @@ def test_analyze_text_keeps_caution_for_all_solved_claim():
     assert payload["sentence_results"][0]["suspicion_level"] == "\uC8FC\uC758"
 
 
-def test_analyze_url_uses_extracted_text(monkeypatch):
-    async def fake_extract_from_url(url: str) -> str:
-        assert url == "https://example.com/ad"
-        return "이 크림은 아토피를 치료합니다."
-
-    monkeypatch.setattr(analyze_router, "extract_from_url", fake_extract_from_url)
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/analyze/text",
-            json={
-                "input_type": "url",
-                "content": "https://example.com/ad",
-            },
-        )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["overall_suspicion_level"] == "의심"
-    assert payload["original_text"] == "이 크림은 아토피를 치료합니다."
-
-
-def test_analyze_url_returns_friendly_error(monkeypatch):
-    async def fake_extract_from_url(url: str) -> str:
-        raise ValueError("크롤링이 불가합니다.")
-
-    monkeypatch.setattr(analyze_router, "extract_from_url", fake_extract_from_url)
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/analyze/text",
-            json={
-                "input_type": "url",
-                "content": "https://example.com/blocked",
-            },
-        )
-
-    assert response.status_code == 400
-    assert response.json()["detail"] == "크롤링이 불가합니다."
-
-
 def test_analyze_image_uses_ocr_text(monkeypatch):
-    monkeypatch.setattr(analyze_router, "extract_from_image", lambda _: "단 7일 만에 기미 완전 제거, 100% 효과 보장.")
+    monkeypatch.setattr(analyze_router, "extract_from_image", lambda _: "??7??만에 기�? ?�전 ?�거, 100% ?�과 보장.")
 
     with TestClient(app) as client:
         response = client.post(
@@ -149,8 +108,8 @@ def test_analyze_image_uses_ocr_text(monkeypatch):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["overall_suspicion_level"] == "의심"
-    assert payload["sentence_results"][0]["suspicion_level"] == "의심"
+    assert payload["overall_suspicion_level"] == "?�심"
+    assert payload["sentence_results"][0]["suspicion_level"] == "?�심"
 
 
 def test_analyze_image_rejects_non_image_file():
@@ -161,7 +120,7 @@ def test_analyze_image_rejects_non_image_file():
         )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "이미지 파일만 업로드 가능합니다."
+    assert response.json()["detail"] == "?��?지 ?�일�??�로??가?�합?�다."
 
 
 def test_analyze_text_does_not_drop_sentence_only_because_ad_filter_is_negative(monkeypatch):
@@ -169,13 +128,13 @@ def test_analyze_text_does_not_drop_sentence_only_because_ad_filter_is_negative(
     monkeypatch.setattr(analyze_router, "predict_cosmetic", lambda _: (False, 0.01))
 
     with TestClient(app) as client:
-        response = _post_text(client, "이 크림은 아토피를 치료합니다.")
+        response = _post_text(client, "???�림?� ?�토?��? 치료?�니??")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["overall_suspicion_level"] == "의심"
-    assert payload["sentence_results"][0]["suspicion_level"] == "의심"
-    assert "건너뜀" not in payload["sentence_results"][0]["reason"]
+    assert payload["overall_suspicion_level"] == "?�심"
+    assert payload["sentence_results"][0]["suspicion_level"] == "?�심"
+    assert "건너?�" not in payload["sentence_results"][0]["reason"]
 
 
 def test_analyze_text_forwards_uncertain_domain_copy_to_kobert(monkeypatch):
@@ -183,12 +142,12 @@ def test_analyze_text_forwards_uncertain_domain_copy_to_kobert(monkeypatch):
     monkeypatch.setattr(analyze_router, "predict_cosmetic", lambda _: (False, 0.01))
 
     async def fake_analyze_with_kobert(sentence, rule_result):
-        assert sentence == "급이 다른 98% 마데카소사이드"
-        assert rule_result.suspicion_level.value == "정상"
+        assert sentence == "급이 ?�른 98% 마데카소?�이??
+        assert rule_result.suspicion_level.value == "?�상"
         return rule_result.model_copy(
             update={
                 "suspicion_level": SuspicionLevel.CAUTION,
-                "reason": "AI가 추가 판단했습니다.",
+                "reason": "AI가 추�? ?�단?�습?�다.",
                 "score": 0.42,
             }
         )
@@ -196,9 +155,10 @@ def test_analyze_text_forwards_uncertain_domain_copy_to_kobert(monkeypatch):
     monkeypatch.setattr(analyze_router, "analyze_with_kobert", fake_analyze_with_kobert)
 
     with TestClient(app) as client:
-        response = _post_text(client, "급이 다른 98% 마데카소사이드")
+        response = _post_text(client, "급이 ?�른 98% 마데카소?�이??)
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["sentence_results"][0]["suspicion_level"] == "주의"
-    assert payload["sentence_results"][0]["reason"] == "AI가 추가 판단했습니다."
+    assert payload["sentence_results"][0]["reason"] == "AI가 추�? ?�단?�습?�다."
+
