@@ -126,25 +126,6 @@ Content-Type: application/json
 
 ---
 
-### 3. URL 분석
-
-```
-POST /analyze/url
-Content-Type: application/json
-```
-
-**요청**
-```json
-{
-  "content": "https://example.com/product"
-}
-```
-
-**응답**  
-텍스트 분석과 동일한 형식으로 반환됩니다.
-
----
-
 ### 4. 이미지 분석
 
 ```
@@ -201,7 +182,7 @@ GET /history/{id}
 
 | HTTP 상태코드 | 상황 |
 |---|---|
-| `400` | 잘못된 요청, URL 추출 실패, 이미지 파일 형식 오류 |
+| `400` | 잘못된 요청, 이미지 파일 형식 오류 |
 | `422` | 이미지 OCR 실패, 텍스트 인식 실패 |
 | `500` | Spring Boot 내부 오류 또는 분석 서버 통신 오류 |
 
@@ -214,7 +195,6 @@ GET /history/{id}
 | `GET /health` | 분석 서버 상태 확인 |
 | `GET /ready` | 모델 preload 완료 여부 확인 |
 | `POST /analyze/text` | 텍스트 분석 요청 |
-| `POST /analyze/url` | URL 분석 요청용 호환 엔드포인트 |
 | `POST /analyze/image` | 이미지 분석 요청 |
 | `POST /analyze` | 구버전 클라이언트 호환용 기본 분석 엔드포인트 |
 
@@ -236,21 +216,6 @@ GET /history/{id}
 }
 ```
 
-#### `POST /analyze/text`에서 URL 분석
-```json
-{
-  "input_type": "url",
-  "content": "https://example.com/product"
-}
-```
-
-#### `POST /analyze/url`
-```json
-{
-  "content": "https://example.com/product"
-}
-```
-
 ---
 
 ## 전체 통신 흐름
@@ -261,9 +226,9 @@ React (3000 or 5173)
 Spring Boot (8080)
   1. 요청 수신 및 인증/권한 처리
   2. FastAPI로 분석 요청 전달
-  ↓  POST /analyze/text 또는 /analyze/url 또는 /analyze/image
+  ↓  POST /analyze/text 또는 /analyze/image
 FastAPI (8000)
-  1. 텍스트 추출 (직접 입력 / URL 본문 추출 / 이미지 OCR)
+  1. 텍스트 추출 (직접 입력 / 이미지 OCR)
   2. 문장 분리 (kss 우선, 없으면 정규식 폴백)
   3. 규칙 기반 1차 판정
   4. 선택적 KoBERT 문맥 판정
