@@ -46,35 +46,35 @@ GOOGLE_VISION_TIMEOUT = float(os.getenv("GOOGLE_VISION_TIMEOUT", "5"))
 GOOGLE_VISION_FEATURE = os.getenv("GOOGLE_VISION_FEATURE", "TEXT_DETECTION").strip().upper()
 GOOGLE_VISION_MAX_RESULTS = max(1, int(os.getenv("GOOGLE_VISION_MAX_RESULTS", "1")))
 OCR_CORRECTIONS = {
-    "?��?�?: "?��?�?,
-    "?��?�?: "?��?�?,
-    "?��?�?: "?��?�?,
+    "피부릍": "피부를",
+    "피부륻": "피부를",
+    "피부률": "피부를",
     "주릅": "주름",
     "주름개선": "주름 개선",
-    "?�과보장?�나??: "?�과 보장?�니??,
-    "?�과보장": "?�과 보장",
-    "?�토?��?�?: "?�토??치료",
-    "?�코메도?�나": "?�코메도?�닉",
-    "?�코메도?�닉??: "?�코메도?�닉",
-    "?�티?�이�?": "?�티?�이�?",
-    "?��?치�??�도": "?��?치�???,
-    "?�체?�용?�힘 ?�료": "?�체?�용?�험 ?�료",
-    "?�체?�용?�험 ?�로": "?�체?�용?�험 ?�료",
-    "?�체?�용?�혐": "?�체?�용?�험",
-    "기�??�리": "기�??�티",
-    "기�? ?�리": "기�? ?�티",
-    "?�티": "?�티",
-    "?�력?�??: "?�력 ?�??,
-    "지쳐보?��?": "지�?보이??,
-    "지쳐보?�는": "지�?보이??,
-    "지처보?�는": "지�?보이??,
-    "?��?�?: "?��? �?,
-    "로리??: "�?리셋",
-    "리셋?�세??: "리셋?�세??,
-    "리셋?�서??: "리셋?�세??,
-    "?�럼": "?�럼",
-    "?��?": "?�플",
-    "?�림?�나??: "?�림?�니??,
+    "효과보장입나다": "효과 보장입니다",
+    "효과보장": "효과 보장",
+    "아토피를료": "아토피 치료",
+    "논코메도제나": "논코메도제닉",
+    "논코메도제닉야": "논코메도제닉",
+    "안티에이징 ": "안티에이징 ",
+    "피부치밀도도": "피부치밀도",
+    "인체적용시힘 완료": "인체적용시험 완료",
+    "인체적용시험 완로": "인체적용시험 완료",
+    "인체적용시혐": "인체적용시험",
+    "기미잡리": "기미잡티",
+    "기미 잡리": "기미 잡티",
+    "잠티": "잡티",
+    "탄력저하": "탄력 저하",
+    "지쳐보이틀": "지쳐 보이는",
+    "지쳐보이는": "지쳐 보이는",
+    "지처보이는": "지쳐 보이는",
+    "피부결": "피부 결",
+    "로리셋": "로 리셋",
+    "리셋하세오": "리셋하세요",
+    "리셋하서요": "리셋하세요",
+    "쎄럼": "세럼",
+    "앰풀": "앰플",
+    "크림입나다": "크림입니다",
 }
 
 
@@ -105,22 +105,22 @@ def _get_paddle_reader():
 def _normalize_ocr_text(text: str) -> str:
     cleaned = text.replace("\r", "\n")
     cleaned = re.sub(r"[|¦]+", " ", cleaned)
-    cleaned = re.sub(r"[`´?�’“�?+", "", cleaned)
+    cleaned = re.sub(r"[`´‘’“”]+", "", cleaned)
     cleaned = cleaned.replace(" / ", "/")
     cleaned = cleaned.replace(" mm", "mm")
     cleaned = re.sub(r"(?<=\d)\.\s+(?=\d)", ".", cleaned)
-    cleaned = re.sub(r"([가-?�A-Za-z0-9])([,.:;!?])", r"\1\2 ", cleaned)
+    cleaned = re.sub(r"([가-힣A-Za-z0-9])([,.:;!?])", r"\1\2 ", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     for src, dst in OCR_CORRECTIONS.items():
         cleaned = cleaned.replace(src, dst)
     cleaned = re.sub(r"(?<=\d)\s*/\s*(?=\d)", "/", cleaned)
     cleaned = re.sub(r"(?<=\d)\s*mm", "mm", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"(?<=[가-??)\s*/\s*(?=[가-??)", "/", cleaned)
+    cleaned = re.sub(r"(?<=[가-힣])\s*/\s*(?=[가-힣])", "/", cleaned)
     cleaned = re.sub(r"0\.\s*5mm/15mm", "0.5mm/1.5mm", cleaned)
     cleaned = re.sub(r"0\.5mm/15mm", "0.5mm/1.5mm", cleaned)
     cleaned = re.sub(r"0\.5mm/1Smm", "0.5mm/1.5mm", cleaned)
-    cleaned = re.sub(r"?�체 ?�용 ?�험 ?�료", "?�체?�용?�험 ?�료", cleaned)
+    cleaned = re.sub(r"인체 적용 시험 완료", "인체적용시험 완료", cleaned)
     lines = [line.strip() for line in cleaned.split("\n") if len(line.strip()) > 1]
     return "\n".join(lines).strip()
 
@@ -130,7 +130,7 @@ def _ocr_quality_score(text: str, confidences: list[float]) -> float:
         return 0.0
     avg_conf = sum(confidences) / max(len(confidences), 1)
     text_len = len(text)
-    korean_chars = sum("가" <= ch <= "?? for ch in text)
+    korean_chars = sum("가" <= ch <= "힣" for ch in text)
     alpha_num = sum(ch.isalnum() for ch in text)
     special_chars = text_len - alpha_num - text.count(" ")
     korean_ratio = korean_chars / max(text_len, 1)
@@ -202,7 +202,7 @@ def _prepare_google_vision_image(image_bytes: bytes) -> bytes:
 
 def _extract_text_rows(image_bytes: bytes) -> list[bytes]:
     """
-    체크리스??배너???��?지?�서 ?�스??�??�위�?분리?�다.
+    체크리스트/배너형 이미지에서 텍스트 줄 단위로 분리한다.
     """
     rows: list[bytes] = []
     try:
@@ -265,7 +265,7 @@ def _extract_text_rows(image_bytes: bytes) -> list[bytes]:
 
 def _build_ocr_variants(image_bytes: bytes) -> list[tuple[str, bytes]]:
     """
-    ?�본 + ?�러 ?�처�?버전??만들??OCR ?�공률을 ?�인??
+    원본 + 여러 전처리 버전을 만들어 OCR 성공률을 높인다.
     """
     variants: list[tuple[str, bytes]] = [("original", image_bytes)]
     try:
@@ -441,7 +441,7 @@ def _parse_google_vision_response(payload: dict) -> dict:
     response = responses[0] or {}
     error = response.get("error") or {}
     if error:
-        message = error.get("message") or "Google Vision OCR ?�청???�패?�습?�다."
+        message = error.get("message") or "Google Vision OCR 요청이 실패했습니다."
         raise RuntimeError(message)
 
     annotations = response.get("textAnnotations") or []
@@ -480,7 +480,7 @@ def _parse_google_vision_response(payload: dict) -> dict:
 
 def _run_google_vision_once(image_bytes: bytes) -> dict:
     if not GOOGLE_VISION_API_KEY:
-        raise RuntimeError("GOOGLE_VISION_API_KEY가 ?�정?�어 ?��? ?�습?�다.")
+        raise RuntimeError("GOOGLE_VISION_API_KEY가 설정되어 있지 않습니다.")
 
     _sanitize_sslkeylogfile()
     encoded = base64.b64encode(image_bytes).decode("ascii")
@@ -503,14 +503,14 @@ def _run_google_vision_once(image_bytes: bytes) -> dict:
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
-        raise RuntimeError(f"Google Vision OCR HTTP ?�류({e.response.status_code}): {e.response.text}") from e
+        raise RuntimeError(f"Google Vision OCR HTTP 오류({e.response.status_code}): {e.response.text}") from e
     except httpx.HTTPError as e:
-        raise RuntimeError(f"Google Vision OCR ?�출 ?�패: {e}") from e
+        raise RuntimeError(f"Google Vision OCR 호출 실패: {e}") from e
 
     try:
         payload = response.json()
     except ValueError as e:
-        raise RuntimeError("Google Vision OCR ?�답??JSON???�닙?�다.") from e
+        raise RuntimeError("Google Vision OCR 응답이 JSON이 아닙니다.") from e
 
     return _parse_google_vision_response(payload)
 
@@ -653,8 +653,10 @@ except ImportError:
 
 def extract_from_image(image_bytes: bytes) -> str:
     """
-    ?��?지?�서 ?�스??추출.
-    - ?�러 ?�처�?버전??만든 ??EasyOCR�??�수??    - 1�?결과 ?�질????���??�화??threshold�?fallback ?�시??    - 결과??간단??OCR ?��? 교정??거쳐 반환
+    이미지에서 텍스트 추출.
+    - 여러 전처리 버전을 만든 뒤 EasyOCR로 점수화
+    - 1차 결과 품질이 낮으면 완화된 threshold로 fallback 재시도
+    - 결과는 간단한 OCR 오타 교정을 거쳐 반환
     """
     engine = OCR_ENGINE
     if engine not in {"auto", "paddle", "easy", "google", "vision", "google_vision"}:
@@ -664,23 +666,23 @@ def extract_from_image(image_bytes: bytes) -> str:
         try:
             return _extract_with_google_vision_variants(image_bytes)
         except Exception as e:
-            raise RuntimeError(f"Google Vision OCR ?�스??추출 ?�패: {e}")
+            raise RuntimeError(f"Google Vision OCR 텍스트 추출 실패: {e}")
 
     if engine == "paddle":
         if not _PADDLEOCR_AVAILABLE:
-            raise RuntimeError("PaddleOCR가 ?�치?�어 ?��? ?�습?�다. pip install paddleocr �??�행?�세??")
+            raise RuntimeError("PaddleOCR가 설치되어 있지 않습니다. pip install paddleocr 를 실행하세요.")
         try:
             return _extract_with_paddleocr_variants(image_bytes)
         except Exception as e:
-            raise RuntimeError(f"PaddleOCR ?�스??추출 ?�패: {e}")
+            raise RuntimeError(f"PaddleOCR 텍스트 추출 실패: {e}")
 
     if engine == "easy":
         if not _EASYOCR_AVAILABLE:
-            raise RuntimeError("EasyOCR가 ?�치?�어 ?��? ?�습?�다. pip install easyocr �??�행?�세??")
+            raise RuntimeError("EasyOCR가 설치되어 있지 않습니다. pip install easyocr 를 실행하세요.")
         try:
             return _extract_with_easyocr_variants(image_bytes)
         except Exception as e:
-            raise RuntimeError(f"EasyOCR ?�스??추출 ?�패: {e}")
+            raise RuntimeError(f"EasyOCR 텍스트 추출 실패: {e}")
 
     if GOOGLE_VISION_API_KEY:
         try:
@@ -716,25 +718,25 @@ def extract_from_image(image_bytes: bytes) -> str:
         try:
             return _extract_with_paddleocr_variants(image_bytes)
         except Exception as e:
-            raise RuntimeError(f"PaddleOCR ?�스??추출 ?�패: {e}")
+            raise RuntimeError(f"PaddleOCR 텍스트 추출 실패: {e}")
 
     if not _EASYOCR_AVAILABLE:
-        raise RuntimeError("?�용 가?�한 OCR ?�진???�습?�다. paddleocr ?�는 easyocr�??�치?�세??")
+        raise RuntimeError("사용 가능한 OCR 엔진이 없습니다. paddleocr 또는 easyocr를 설치하세요.")
     try:
         return _extract_with_easyocr_variants(image_bytes)
     except Exception as e:
-        raise RuntimeError(f"EasyOCR ?�스??추출 ?�패: {e}")
+        raise RuntimeError(f"EasyOCR 텍스트 추출 실패: {e}")
 
 
 def split_sentences(text: str) -> list[str]:
-    """?�스?��? 문장 ?�위�?분리 (kss ?�선, ?�으�??�규???�백)"""
+    """텍스트를 문장 단위로 분리 (kss 우선, 없으면 정규식 폴백)"""
     if _KSS_AVAILABLE:
         return _merge_sentence_fragments(_split_with_kss(text))
     return _merge_sentence_fragments(_split_with_regex(text))
 
 
 def _split_with_kss(text: str) -> list[str]:
-    """kss ?�이브러리�? ?�용???�국??문장 분리"""
+    """kss 라이브러리를 사용한 한국어 문장 분리"""
     try:
         paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
         sentences = []
@@ -747,14 +749,14 @@ def _split_with_kss(text: str) -> list[str]:
 
 
 def _split_with_regex(text: str) -> list[str]:
-    """?�규??기반 문장 분리 (?�백??"""
+    """정규식 기반 문장 분리 (폴백용)"""
     sentences = re.split(r"(?<=[.!?])\s+|[\n]+", text)
     return [s.strip() for s in sentences if len(s.strip()) > 3]
 
 
 _SENTENCE_END_RE = re.compile(
-    r"([.!??�！�?$|"
-    r"(?�니???�니???�니???�습?�다|?�립?�다|?�니???�니???�세???�요|?�요|?�요|?�요|?�요|????$)"
+    r"([.!?。！？]$|"
+    r"(습니다|합니다|됩니다|했습니다|드립니다|입니다|합니다|하세요|돼요|해요|나요|어요|아요|다|요)$)"
 )
 
 
@@ -764,8 +766,8 @@ def _looks_complete_sentence(text: str) -> bool:
 
 def _is_short_ocr_fragment(text: str) -> bool:
     """
-    OCR 광고 ?��?지??카피가 �??�위�??�겨 ?�어?�는 경우가 많다.
-    ?�결 문장???�닌 짧�? 줄�? ?�음 줄과 ?�쳐 문맥??보존?�다.
+    OCR 광고 이미지는 카피가 줄 단위로 끊겨 들어오는 경우가 많다.
+    완결 문장이 아닌 짧은 줄은 다음 줄과 합쳐 문맥을 보존한다.
     """
     s = text.strip()
     if _looks_complete_sentence(s):
@@ -790,8 +792,8 @@ def _flush_fragment_buffer(buffer: list[str], merged: list[str]) -> None:
 
 def _merge_sentence_fragments(sentences: list[str]) -> list[str]:
     """
-    줄바�?기반 OCR 조각???��? ?�위�??�결?�한??
-    ?? "기�??�티\\n?�력?�??\n...\\n리셋?�세?? -> ??카피 문장
+    줄바꿈 기반 OCR 조각을 의미 단위로 재결합한다.
+    예: "기미잡티\\n탄력저하\\n...\\n리셋하세요" -> 한 카피 문장
     """
     merged: list[str] = []
     buffer: list[str] = []
@@ -826,4 +828,3 @@ def _merge_sentence_fragments(sentences: list[str]) -> list[str]:
 
     _flush_fragment_buffer(buffer, merged)
     return merged
-
